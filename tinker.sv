@@ -8,7 +8,7 @@
 `include "hdl/mem_module.sv"
 
 // multicycle core
-// S_IF -> S_ID -> S_EX -> (S_MEM)? -> (S_WB)?
+// S0 -> S1 -> S2 -> (S3)? -> (S4)?
 module tinker_core (
     input clk,
     input reset,
@@ -17,19 +17,19 @@ module tinker_core (
   localparam MEM_SIZE = 512 * 1024;
 
   typedef enum logic [2:0] {
-    S_IF  = 3'd0,
-    S_ID  = 3'd1,
-    S_EX  = 3'd2,
-    S_MEM = 3'd3,
-    S_WB  = 3'd4
+    S0  = 3'd0,
+    S1  = 3'd1,
+    S2  = 3'd2,
+    S3 = 3'd3,
+    S4  = 3'd4
   } state_t;
 
   state_t state;
 
   wire halted = hlt;
 
-  // latch decoded signals at end of S_ID
-  reg [31:0] IR;  // latched in S_IF
+  // latch decoded signals at end of S1
+  reg [31:0] IR;  // latched in S0
 
   // latched decoder outputs
   reg [ 4:0] latch_op;
@@ -93,7 +93,7 @@ module tinker_core (
       .raddr3(rt_addr_w),
       .waddr (latch_waddr),
       .data  (wb_data),
-      .write (latch_write && (state == S_WB) && !halted),
+      .write (latch_write && (state == S4) && !halted),
       .r1    (data1_w),
       .r2    (data2_w),
       .r3    (data3_w)
@@ -124,7 +124,7 @@ module tinker_core (
                               : (latch_data1 + latch_imm);
 
   wire [63:0] mem_write_val = latch_is_call ? pc : latch_data2;
-  wire mem_we = (latch_is_store || latch_is_call) && (state == S_MEM) && !halted;
+  wire mem_we = (latch_is_store || latch_is_call) && (state == S3) && !halted;
 
   mem_module #(
       .MEM_SIZE(MEM_SIZE)
@@ -146,15 +146,15 @@ module tinker_core (
                          alu_result;
 
   // fetch / PC
-  wire advance = (state == S_IF);  // advance PC only in S_IF
+  wire advance = (state == S0);  // advance PC only in S0
 
   fetch fetch_inst (
       .clk        (clk),
       .reset      (reset),
       .halt       (halted),
       .advance    (advance),
-      .is_jump    (latch_is_jump && !halted && state == S_EX),
-      .is_branch  (latch_is_branch && !halted && state == S_EX),
+      .is_jump    (latch_is_jump && !halted && state == S2),
+      .is_branch  (latch_is_branch && !halted && state == S2),
       .is_brgt    (latch_is_brgt),
       .is_brr_reg (latch_is_brr_reg),
       .is_brr_imm (latch_is_brr_imm),
@@ -169,34 +169,34 @@ module tinker_core (
   );
 
   // FSM — w latched signlas
-  wire needs_mem = latch_is_load || latch_is_store || latch_is_call || latch_is_return;
-  wire needs_wb  = latch_write && !latch_is_store && !latch_is_branch
+  wire needS3 = latch_is_load || latch_is_store || latch_is_call || latch_is_return;
+  wire needS4  = latch_write && !latch_is_store && !latch_is_branch
                    && !latch_is_jump && !latch_is_halt;
 
   always @(posedge clk) begin
     if (reset) begin
-      state <= S_IF;
+      state <= S0;
     end else if (!halted) begin
       case (state)
-        S_IF: state <= S_ID;
-        S_ID: state <= S_EX;
-        S_EX: state <= needs_mem ? S_MEM : needs_wb ? S_WB : S_IF;
-        S_MEM: state <= needs_wb ? S_WB : S_IF;
-        S_WB: state <= S_IF;
-        default: state <= S_IF;
+        S0: state <= S1;
+        S1: state <= S2;
+        S2: state <= needS3 ? S3 : needS4 ? S4 : S0;
+        S3: state <= needS4 ? S4 : S0;
+        S4: state <= S0;
+        default: state <= S0;
       endcase
     end
   end
 
   // latching
-  // S_IF: latch fetched instr
+  // S0: latch fetched instr
   always @(posedge clk) begin
-    if (state == S_IF && !halted) IR <= instr_w;
+    if (state == S0 && !halted) IR <= instr_w;
   end
 
-  // S_ID: latch decoded ctrl signals & reg read values
+  // S1: latch decoded ctrl signals & reg read values
   always @(posedge clk) begin
-    if (state == S_ID && !halted) begin
+    if (state == S1 && !halted) begin
       latch_op         <= op_w;
       latch_waddr      <= waddr_w;
       latch_imm        <= immediate_w;
@@ -223,7 +223,7 @@ module tinker_core (
   // halt latch
   always @(posedge clk) begin
     if (reset) hlt <= 0;
-    else if (latch_is_halt && state == S_EX) hlt <= 1;
+    else if (latch_is_halt && state == S2) hlt <= 1;
   end
 
   // r31 stack ptr init
