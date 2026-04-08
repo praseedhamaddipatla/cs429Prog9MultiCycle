@@ -7,7 +7,8 @@
 `include "hdl/fetch.sv"
 `include "hdl/mem_module.sv"
 
-// top-level core - wires fetch, memory, decoder, register file, and alu together
+// multicycle core
+// S_IF -> S_ID -> S_EX -> (S_MEM)? -> (S_WB)?
 module tinker_core (
     input clk,
     input reset,
@@ -15,7 +16,6 @@ module tinker_core (
 );
   localparam MEM_SIZE = 512 * 1024;
 
-  // fsm for multi cycle
   typedef enum logic [2:0] {
     S_IF  = 3'd0,
     S_ID  = 3'd1,
@@ -26,207 +26,207 @@ module tinker_core (
 
   state_t state;
 
-  // halted is the gating signal derived from the hlt output register
   wire halted = hlt;
 
-  // needs_mem and needs_wb computed locally from decoder outputs
-  // is_call included in needs_mem because call must write the return address to memory
-  wire needs_mem = is_load || is_store || is_call;
-  wire needs_wb  = !is_store && !is_branch && !is_jump && !is_halt;
+  // latch decoded signals at end of S_ID
+  reg [31:0] IR;  // latched in S_IF
 
-  // next state logic
-  always @(posedge clk) begin
-    if (reset) begin
-      state <= S_IF;
-    end else begin
-      case (state)
-        S_IF:  state <= S_ID;
-        S_ID:  state <= S_EX;
-        S_EX:  state <= needs_mem ? S_MEM : needs_wb ? S_WB : S_IF;
-        S_MEM: state <= needs_wb ? S_WB : S_IF;
-        S_WB:  state <= S_IF;
-      endcase
-    end
-  end
+  // latched decoder outputs
+  reg [ 4:0] latch_op;
+  reg [ 4:0] latch_waddr;
+  reg [63:0] latch_imm;
+  reg latch_use_imm;
+  reg latch_write;
+  reg latch_is_load, latch_is_store;
+  reg latch_is_branch, latch_is_brgt, latch_is_jump;
+  reg latch_is_brr_reg, latch_is_brr_imm;
+  reg latch_is_return, latch_is_call;
+  reg latch_is_halt;
+  reg latch_is_mov_reg, latch_is_mov_imm;
 
-  // inter state regs (latches)
-  reg [31:0] IR;  // instruction register (from IF)
-  reg [63:0] PC_next;  // PC+8, computed in IF, used for branches
+  // latched reg read values
+  reg [63:0] latch_data1, latch_data2, latch_data3;
 
-  // decoded fields (from ID)
-  reg [ 4:0] dec_opcode;
-  reg [4:0] dec_rd, dec_rs, dec_rt;
-  reg [11:0] dec_L;
-  reg [63:0] dec_A, dec_B;  // register values read in ID
+  // decoder wires
+  wire [4:0] raddr1_w, raddr2_w, waddr_w, op_w, rt_addr_w;
+  wire [63:0] immediate_w;
+  wire use_imm_w, write_w;
+  wire is_load_w, is_store_w;
+  wire is_branch_w, is_brgt_w, is_jump_w;
+  wire is_brr_reg_w, is_brr_imm_w;
+  wire is_return_w, is_call_w;
+  wire is_halt_w, is_mov_reg_w, is_mov_imm_w;
 
-  // execution result (from EX)
-  reg  [63:0] ALU_OUT;
-  reg  [63:0] MEM_DATA;  // data read from memory in MEM
+  // decode the latched IR
+  decoder dec_inst (
+      .instr     (IR),
+      .raddr1    (raddr1_w),
+      .raddr2    (raddr2_w),
+      .waddr     (waddr_w),
+      .immediate (immediate_w),
+      .op        (op_w),
+      .use_imm   (use_imm_w),
+      .write     (write_w),
+      .is_load   (is_load_w),
+      .is_store  (is_store_w),
+      .is_branch (is_branch_w),
+      .is_brgt   (is_brgt_w),
+      .is_jump   (is_jump_w),
+      .is_brr_reg(is_brr_reg_w),
+      .is_brr_imm(is_brr_imm_w),
+      .is_return (is_return_w),
+      .is_call   (is_call_w),
+      .is_halt   (is_halt_w),
+      .is_mov_reg(is_mov_reg_w),
+      .is_mov_imm(is_mov_imm_w),
+      .rt_addr   (rt_addr_w)
+  );
 
-  // latch the instruction in S_IF so it stays stable through all stages
-  always @(posedge clk) begin
-    if (state == S_IF)
-      IR <= instr;
-  end
+  // regfile wires
+  wire [63:0] data1_w, data2_w, data3_w;
 
-  // wires to connect modules
+  reg_file reg_file (
+      .clk   (clk),
+      .reset (reset),
+      .raddr1(raddr1_w),
+      .raddr2(raddr2_w),
+      .raddr3(rt_addr_w),
+      .waddr (latch_waddr),
+      .data  (wb_data),
+      .write (latch_write && (state == S_WB) && !halted),
+      .r1    (data1_w),
+      .r2    (data2_w),
+      .r3    (data3_w)
+  );
 
-  // IF => decoder: feed IR during ID/EX/MEM/WB, live instr only during IF
-  wire [31:0] dec_instr = (state == S_IF) ? instr : IR;
-
-  // IF => decoder
-  wire [63:0] pc;
-  wire [31:0] instr;
-
-  // decoder outputs
-  wire [4:0] raddr1, raddr2, waddr;
-  wire [63:0] immediate;
-  wire [ 4:0] op;
-  wire use_imm, write;
-  wire is_load, is_store;
-  wire is_branch, is_brgt, is_jump;
-  wire is_brr_reg, is_brr_imm;
-  wire is_return, is_call;
-  wire is_halt;
-  wire is_mov_reg, is_mov_imm;
-  wire [4:0] rt_addr;
-
-  // regfile => ALU/IF/mem
-  // data1 = raddr1, data2 = raddr2, data3 = raddr3 (rt for brgt)
-  wire [63:0] data1, data2, data3;
-
-  // ALU => regfile/IF
+  // ALU w latched vals
+  wire [63:0] alu_a = latch_is_brgt ? latch_data2 : latch_data1;
+  wire [63:0] alu_b = latch_is_brgt ? latch_data3 : latch_use_imm ? latch_imm : latch_data2;
   wire [63:0] alu_result;
 
-  // mem => regfile/IF
+  alu alu_inst (
+      .a     (alu_a),
+      .b     (alu_b),
+      .op    (latch_op),
+      .result(alu_result)
+  );
+
+  // memory wires
+  wire [63:0] pc;
+  wire [31:0] instr_w; 
   wire [63:0] mem_rdata;
 
-  // regfile writeback data
-  wire [63:0] wb_data;
-
-  // mem ctrl
-  wire [63:0] mem_data_addr;
-  wire [63:0] mem_write_val;
-  wire        mem_we;
-
-  // halt latch - only latch halt in S_EX so it fires exactly once per instruction
-  always @(posedge clk) begin
-    if (reset) hlt <= 0;
-    else if (is_halt && state == S_EX) hlt <= 1;
-  end
-
-  // call/return use r31 as stack pointer
   wire [63:0] r31_val = reg_file.registers[31];
   wire [63:0] stack_top = r31_val - 64'd8;
 
-  // ALU input mux
-  // brgt:   a=data2(rs),  b=data3(rt)
-  // brnz:   a=data1(rs),  b=unused
-  // others: a=data1,      b=imm or data2
-  wire [63:0] alu_a = is_brgt ? data2 : data1;
-  wire [63:0] alu_b = is_brgt ? data3 : (use_imm ? immediate : data2);
+  wire [63:0] mem_data_addr = (latch_is_return || latch_is_call)
+                              ? stack_top
+                              : (latch_data1 + latch_imm);
 
-  // mem ctrl
-  assign mem_data_addr = (is_return || is_call) ? stack_top : (data1 + immediate);
-  assign mem_write_val = is_call ? (pc + 64'd4) : data2;
-  // memory write only fires in S_MEM
-  assign mem_we = (is_store || is_call) && (state == S_MEM) && !halted;
+  wire [63:0] mem_write_val = latch_is_call ? pc : latch_data2;
+  wire mem_we = (latch_is_store || latch_is_call) && (state == S_MEM) && !halted;
 
-  // writeback mux
-  assign wb_data =
-      is_load    ? mem_rdata :
-      is_mov_reg ? data1     :
-      is_mov_imm ? ((data1 & ~64'hFFF) | immediate) :
-                   alu_result;
-
-  // module instantiation
-
-  // pc logic - IF owns the PC, computes next PC from regfile + ALU feedback
-  // fetch only advances PC when we are in S_EX so it moves exactly once per instruction
-  fetch fetch_inst (
-      .clk        (clk),
-      .reset      (reset),
-      .halt       (halted),
-      .is_jump    (is_jump    && !halted && state == S_EX),
-      .is_branch  (is_branch  && !halted && state == S_EX),
-      .is_brgt    (is_brgt),
-      .is_brr_reg (is_brr_reg),
-      .is_brr_imm (is_brr_imm),
-      .is_return  (is_return),
-      .is_call    (is_call),
-      .branch_cond(alu_result[0]),         // ALU => IF
-      .data1      (data1),                 // regfile => IF
-      .data2      (data2),                 // regfile => IF
-      .immediate  (immediate),
-      .mem_rdata  (mem_rdata),             // memory => IF (return address)
-      .pc         (pc)
-  );
-
-  // memory: IF port + data port
   mem_module #(
       .MEM_SIZE(MEM_SIZE)
   ) memory (
       .clk       (clk),
       .fetch_addr(pc),
-      .instr_out (instr),
+      .instr_out (instr_w),
       .data_addr (mem_data_addr),
       .write_data(mem_write_val),
       .we        (mem_we),
       .read_data (mem_rdata)
   );
 
-  // IF => decoder: use the latched IR after S_IF so decoded signals stay
-  // stable while PC has already moved to the next instruction
-  decoder dec_inst (
-      .instr     (dec_instr),
-      .raddr1    (raddr1),
-      .raddr2    (raddr2),
-      .waddr     (waddr),
-      .immediate (immediate),
-      .op        (op),
-      .use_imm   (use_imm),
-      .write     (write),
-      .is_load   (is_load),
-      .is_store  (is_store),
-      .is_branch (is_branch),
-      .is_brgt   (is_brgt),
-      .is_jump   (is_jump),
-      .is_brr_reg(is_brr_reg),
-      .is_brr_imm(is_brr_imm),
-      .is_return (is_return),
-      .is_call   (is_call),
-      .is_halt   (is_halt),
-      .is_mov_reg(is_mov_reg),
-      .is_mov_imm(is_mov_imm),
-      .rt_addr   (rt_addr)
+  // writeback mux
+  wire [63:0] wb_data =
+      latch_is_load    ? mem_rdata :
+      latch_is_mov_reg ? latch_data1 :
+      latch_is_mov_imm ? ((latch_data1 & ~64'hFFF) | latch_imm) :
+                         alu_result;
+
+  // fetch / PC
+  wire advance = (state == S_IF);  // advance PC only in S_IF
+
+  fetch fetch_inst (
+      .clk        (clk),
+      .reset      (reset),
+      .halt       (halted),
+      .advance    (advance),
+      .is_jump    (latch_is_jump && !halted && state == S_EX),
+      .is_branch  (latch_is_branch && !halted && state == S_EX),
+      .is_brgt    (latch_is_brgt),
+      .is_brr_reg (latch_is_brr_reg),
+      .is_brr_imm (latch_is_brr_imm),
+      .is_return  (latch_is_return),
+      .is_call    (latch_is_call),
+      .branch_cond(alu_result[0]),
+      .data1      (latch_data1),
+      .data2      (latch_data2),
+      .immediate  (latch_imm),
+      .mem_rdata  (mem_rdata),
+      .pc         (pc)
   );
 
-  // decoder => regfile => ALU/IF
-  // third read port (raddr3) carries rt for brgt comparison
-  reg_file reg_file (
-      .clk   (clk),
-      .reset (reset),
-      .raddr1(raddr1),
-      .raddr2(raddr2),
-      .raddr3(rt_addr),           // rt for brgt, 0 otherwise
-      .waddr (waddr),
-      .data  (wb_data),
-      // register write only fires in S_WB
-      .write (write && (state == S_WB) && !halted),
-      .r1    (data1),
-      .r2    (data2),
-      .r3    (data3)
-  );
+  // FSM — w latched signlas
+  wire needs_mem = latch_is_load || latch_is_store || latch_is_call || latch_is_return;
+  wire needs_wb  = latch_write && !latch_is_store && !latch_is_branch
+                   && !latch_is_jump && !latch_is_halt;
 
-  // regfile => ALU => IF/regfile/mem
-  alu alu_inst (
-      .a     (alu_a),
-      .b     (alu_b),
-      .op    (op),
-      .result(alu_result)
-  );
+  always @(posedge clk) begin
+    if (reset) begin
+      state <= S_IF;
+    end else if (!halted) begin
+      case (state)
+        S_IF: state <= S_ID;
+        S_ID: state <= S_EX;
+        S_EX: state <= needs_mem ? S_MEM : needs_wb ? S_WB : S_IF;
+        S_MEM: state <= needs_wb ? S_WB : S_IF;
+        S_WB: state <= S_IF;
+        default: state <= S_IF;
+      endcase
+    end
+  end
 
-  // r31 initialized to top of memory on reset
+  // latching
+  // S_IF: latch fetched instr
+  always @(posedge clk) begin
+    if (state == S_IF && !halted) IR <= instr_w;
+  end
+
+  // S_ID: latch decoded ctrl signals & reg read values
+  always @(posedge clk) begin
+    if (state == S_ID && !halted) begin
+      latch_op         <= op_w;
+      latch_waddr      <= waddr_w;
+      latch_imm        <= immediate_w;
+      latch_use_imm    <= use_imm_w;
+      latch_write      <= write_w;
+      latch_is_load    <= is_load_w;
+      latch_is_store   <= is_store_w;
+      latch_is_branch  <= is_branch_w;
+      latch_is_brgt    <= is_brgt_w;
+      latch_is_jump    <= is_jump_w;
+      latch_is_brr_reg <= is_brr_reg_w;
+      latch_is_brr_imm <= is_brr_imm_w;
+      latch_is_return  <= is_return_w;
+      latch_is_call    <= is_call_w;
+      latch_is_halt    <= is_halt_w;
+      latch_is_mov_reg <= is_mov_reg_w;
+      latch_is_mov_imm <= is_mov_imm_w;
+      latch_data1      <= data1_w;
+      latch_data2      <= data2_w;
+      latch_data3      <= data3_w;
+    end
+  end
+
+  // halt latch
+  always @(posedge clk) begin
+    if (reset) hlt <= 0;
+    else if (latch_is_halt && state == S_EX) hlt <= 1;
+  end
+
+  // r31 stack ptr init
   always @(posedge clk) begin
     if (reset) reg_file.registers[31] <= MEM_SIZE;
   end

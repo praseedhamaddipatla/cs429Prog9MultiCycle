@@ -3,6 +3,7 @@ module fetch (
     input clk,
     input reset,
     input halt,
+    input advance,
 
     // decoded instr type
     input is_jump,
@@ -51,7 +52,7 @@ module fetch (
         // bounds check: go to PC_START if oob
         if (next_pc >= `MEM_SIZE) pc_reg <= `PC_START;
         else pc_reg <= next_pc;
-      end else begin
+      end else if (advance) begin
         // bounds check on sequential increment too
         if (pc_reg + 64'd4 >= `MEM_SIZE) pc_reg <= `PC_START;
         else pc_reg <= pc_reg + 64'd4;
