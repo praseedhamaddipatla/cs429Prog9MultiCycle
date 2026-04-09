@@ -187,8 +187,8 @@ module tinker_core (
       .is_brgt(is_brgt_r),
       .is_brr_reg(is_brr_reg_r),
       .is_brr_imm(is_brr_imm_r),
-      .is_return(is_return_r && state == S2),
-      .is_call(is_call_r && state == S2),
+      .is_return(is_return_r && state == S3),
+      .is_call(is_call_r && state == S3),
 
       .branch_cond(alu_result[0]),
       .data1(data1),
