@@ -12,24 +12,23 @@ module reg_file(
     output [63:0] r3
 );
 
-reg [63:0] registers [0:31];
+  reg [63:0] registers [0:31];
 
-// alu sees reg values in the same cycle
-assign r1 = registers[raddr1];
-assign r2 = registers[raddr2];
-assign r3 = registers[raddr3];
+  assign r1 = (raddr1 == 5'd0) ? 64'd0 : registers[raddr1];
+  assign r2 = (raddr2 == 5'd0) ? 64'd0 : registers[raddr2];
+  assign r3 = (raddr3 == 5'd0) ? 64'd0 : registers[raddr3];
 
-
-integer i;
-always @(posedge clk) begin
+  integer i;
+  always @(posedge clk) begin
     if (reset) begin
-        for (i = 0; i < 31; i = i + 1)
-            registers[i] <= 64'd0;
-        // overwrites reg[31] with MEM_SIZE on reset edge
-        registers[31] <= 64'd524288;
-    end else if (write) begin
-        registers[waddr] <= data;
+      for (i = 0; i < 32; i = i + 1) begin
+        if (i == 31) 
+          registers[i] <= 64'h80000;
+        else 
+          registers[i] <= 64'd0;
+      end
+    end else if (write && waddr != 5'd0) begin
+      registers[waddr] <= data;
     end
-end
-
+  end
 endmodule
