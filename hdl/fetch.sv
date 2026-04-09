@@ -33,7 +33,11 @@ module fetch (
   assign pc = pc_reg;
 
   // branch is taken if ALU says so (brnz/brgt) or if unconditional jump
-  wire taken = (is_branch && branch_cond) || is_jump;
+  wire taken =
+    (is_branch && branch_cond) ||
+    is_jump ||
+    is_call ||
+    is_return;
 
   //mux
   wire [63:0] next_pc =
