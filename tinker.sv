@@ -13,27 +13,24 @@ module tinker_core (
     output logic hlt
 );
 
-parameter S0 = 3'd0;
-parameter S1 = 3'd1;
-parameter S2 = 3'd2;
-parameter S3 = 3'd3;
-parameter S4 = 3'd4;
+  parameter S0 = 3'd0;
+  parameter S1 = 3'd1;
+  parameter S2 = 3'd2;
+  parameter S3 = 3'd3;
+  parameter S4 = 3'd4;
 
   reg [2:0] state;
 
   // ctrl signal latches
-
   reg is_load_r, is_store_r, is_call_r;
   reg is_branch_r, is_jump_r, is_halt_r;
   reg write_r, is_return_r;
   reg is_mov_reg_r, is_mov_imm_r;
-
   reg is_brgt_r, is_brr_reg_r, is_brr_imm_r;
 
   // state trans
-
   wire needS3 = is_load_r || is_store_r || is_call_r || is_return_r;
-  wire needS4 = write_r && !is_store_r && !is_branch_r && !is_jump_r && !is_halt_r;
+  wire needS4 = (write_r || is_call_r || is_return_r) && !is_store_r && !is_branch_r && !is_jump_r && !is_halt_r;
 
   always @(posedge clk) begin
     if (reset) state <= S0;
@@ -49,9 +46,7 @@ parameter S4 = 3'd4;
   end
 
   // IR latch
-
   reg [31:0] IR;
-
   always @(posedge clk) begin
     if (state == S0) IR <= instr;
   end
@@ -59,10 +54,8 @@ parameter S4 = 3'd4;
   wire [31:0] dec_instr = (state == S0) ? instr : IR;
 
   // wires
-
   wire [63:0] pc;
   wire [31:0] instr;
-
   wire [4:0] raddr1, raddr2, waddr;
   wire [63:0] immediate;
   wire [ 4:0] op;
@@ -80,7 +73,6 @@ parameter S4 = 3'd4;
   wire [63:0] mem_rdata;
 
   // latch ctrl
-
   always @(posedge clk) begin
     if (state == S1) begin
       is_load_r    <= is_load;
@@ -93,8 +85,6 @@ parameter S4 = 3'd4;
       is_return_r  <= is_return;
       is_mov_reg_r <= is_mov_reg;
       is_mov_imm_r <= is_mov_imm;
-
-      // NEW
       is_brgt_r    <= is_brgt;
       is_brr_reg_r <= is_brr_reg;
       is_brr_imm_r <= is_brr_imm;
@@ -102,19 +92,15 @@ parameter S4 = 3'd4;
   end
 
   // halt
-
   always @(posedge clk) begin
     if (reset) hlt <= 0;
     else if (is_halt_r) hlt <= 1;
   end
 
   // stack ptr
-
   wire [63:0] r31_val = reg_file.registers[31];
-  wire [63:0] stack_top = r31_val - 64'd8;
 
   // alu
-
   wire [63:0] alu_a = is_brgt_r ? data2 : data1;
   wire [63:0] alu_b = is_brgt_r ? data3 : (use_imm ? immediate : data2);
 
@@ -126,11 +112,11 @@ parameter S4 = 3'd4;
   );
 
   // mem
-
-  wire [63:0] mem_data_addr = (is_return_r || is_call_r) ? stack_top : (data1 + immediate);
+  wire [63:0] mem_data_addr = is_call_r   ? (r31_val - 64'd8) : 
+                               is_return_r ? r31_val : 
+                               (data1 + immediate);
 
   wire [63:0] mem_write_val = is_call_r ? (pc + 64'd4) : data2;
-
   wire mem_we = (is_store_r || is_call_r) && (state == S3) && !hlt;
 
   mem_module #(
@@ -146,40 +132,34 @@ parameter S4 = 3'd4;
   );
 
   // writeback
-
   wire [63:0] wb_data =
-      is_load_r    ? mem_rdata :
-      is_mov_reg_r ? data1 :
-      is_mov_imm_r ? ((data1 & ~64'hFFF) | immediate) :
-                     alu_result;
+      is_load_r     ? mem_rdata :
+      is_call_r     ? (r31_val - 64'd8) : 
+      is_return_r   ? (r31_val + 64'd8) : 
+      is_mov_reg_r  ? data1 :
+      is_mov_imm_r  ? ((data1 & ~64'hFFF) | immediate) :
+      alu_result;
 
+  wire [4:0] final_waddr = (is_call_r || is_return_r) ? 5'd31 : waddr;
+  wire final_reg_write = (write_r || is_call_r || is_return_r) && (state == S4) && !hlt;
 
   // PC advance ctrl
-
-  wire advance =
-      (state == S2) &&
-      !hlt &&
-      !is_branch_r &&
-      !is_jump_r &&
-      !is_call_r &&
-      !is_return_r;
+  wire advance = (state == S2) && !hlt && !is_branch_r && !is_jump_r && !is_call_r && !is_return_r;
 
   // fetch
-
   fetch fetch_inst (
       .clk(clk),
       .reset(reset),
       .halt(hlt),
       .advance(advance),
-
       .is_jump(is_jump_r && state == S2),
       .is_branch(is_branch_r && state == S2),
       .is_brgt(is_brgt_r),
       .is_brr_reg(is_brr_reg_r),
       .is_brr_imm(is_brr_imm_r),
-      .is_return(is_return_r && state == S2),
+      // On return/call, the PC update happens after S3 provides the data/target
+      .is_return(is_return_r && state == S3),
       .is_call(is_call_r && state == S2),
-
       .branch_cond(alu_result[0]),
       .data1(data1),
       .data2(data2),
@@ -189,7 +169,6 @@ parameter S4 = 3'd4;
   );
 
   // decoder
-
   decoder dec_inst (
       .instr(dec_instr),
       .raddr1(raddr1),
@@ -215,16 +194,15 @@ parameter S4 = 3'd4;
   );
 
   // regfile
-
   reg_file reg_file (
       .clk(clk),
       .reset(reset),
       .raddr1(raddr1),
       .raddr2(raddr2),
       .raddr3(rt_addr),
-      .waddr(waddr),
+      .waddr(final_waddr),
       .data(wb_data),
-      .write(write_r && (state == S4) && !hlt),
+      .write(final_reg_write),
       .r1(data1),
       .r2(data2),
       .r3(data3)
