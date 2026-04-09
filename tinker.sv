@@ -13,12 +13,12 @@ module tinker_core (
     output logic hlt
 );
 
-parameter S0 = 3'd0;
-parameter S1 = 3'd1;
-parameter S2 = 3'd2;
-parameter S3 = 3'd3;
-parameter S4 = 3'd4;
-/*
+  parameter S0 = 3'd0;
+  parameter S1 = 3'd1;
+  parameter S2 = 3'd2;
+  parameter S3 = 3'd3;
+  parameter S4 = 3'd4;
+  /*
   typedef enum logic [2:0] {
     S0, //fetch
     S1, //decode
@@ -137,7 +137,15 @@ parameter S4 = 3'd4;
 
   wire [63:0] mem_data_addr = (is_return_r || is_call_r) ? stack_top : (data1 + immediate);
 
-  wire [63:0] mem_write_val = is_call_r ? (pc + 64'd4) : data2;
+  // add pc latch
+  reg  [63:0] pc_latch;
+
+  always @(posedge clk) begin
+    if (state == S1) pc_latch <= pc;
+  end
+
+  // change mem_write_val to use pc_latch
+  wire [63:0] mem_write_val = is_call_r ? (pc_latch + 64'd4) : data2;
 
   wire mem_we = (is_store_r || is_call_r) && (state == S3) && !hlt;
 
@@ -164,13 +172,7 @@ parameter S4 = 3'd4;
 
   // PC advance ctrl
 
-  wire advance =
-      (state == S2) &&
-      !hlt &&
-      !is_branch_r &&
-      !is_jump_r &&
-      !is_call_r &&
-      !is_return_r;
+  wire advance = (state == S2) && !hlt && !is_branch_r && !is_jump_r && !is_call_r && !is_return_r;
 
   // fetch
 
