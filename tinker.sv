@@ -1,4 +1,3 @@
-
 `define MEM_SIZE (512 * 1024)
 `define PC_START 64'h2000
 
@@ -95,7 +94,6 @@ module tinker_core (
       is_mov_reg_r <= is_mov_reg;
       is_mov_imm_r <= is_mov_imm;
 
-      // NEW
       is_brgt_r    <= is_brgt;
       is_brr_reg_r <= is_brr_reg;
       is_brr_imm_r <= is_brr_imm;
@@ -167,7 +165,7 @@ module tinker_core (
 
   wire advance = (state == S2) && !hlt && !is_branch_r && !is_jump_r && !is_call_r && !is_return_r;
 
-  // fetch
+  wire jump_at_s2 = is_jump_r && !is_call_r && !is_return_r && (state == S2);
 
   fetch fetch_inst (
       .clk(clk),
@@ -175,7 +173,7 @@ module tinker_core (
       .halt(hlt),
       .advance(advance),
 
-      .is_jump(is_jump_r && state == S2),
+      .is_jump(jump_at_s2),
       .is_branch(is_branch_r && state == S2),
       .is_brgt(is_brgt_r),
       .is_brr_reg(is_brr_reg_r),
