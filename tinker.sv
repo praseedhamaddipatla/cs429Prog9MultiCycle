@@ -28,7 +28,6 @@ module tinker_core (
 
   wire halted = hlt;
 
-  // latch decoded signals at end of S1
   reg [31:0] IR;  // latched in S0
 
   // latched decoder outputs
@@ -57,7 +56,6 @@ module tinker_core (
   wire is_return_w, is_call_w;
   wire is_halt_w, is_mov_reg_w, is_mov_imm_w;
 
-  // decode the latched IR
   decoder dec_inst (
       .instr     (IR),
       .raddr1    (raddr1_w),
@@ -82,7 +80,6 @@ module tinker_core (
       .rt_addr   (rt_addr_w)
   );
 
-  // regfile wires
   wire [63:0] data1_w, data2_w, data3_w;
 
   reg_file reg_file (
@@ -99,7 +96,6 @@ module tinker_core (
       .r3    (data3_w)
   );
 
-  // ALU w latched vals
   wire [63:0] alu_a = latch_is_brgt ? latch_data2 : latch_data1;
   wire [63:0] alu_b = latch_is_brgt ? latch_data3 : latch_use_imm ? latch_imm : latch_data2;
   wire [63:0] alu_result;
@@ -111,12 +107,11 @@ module tinker_core (
       .result(alu_result)
   );
 
-  // memory wires
   wire [63:0] pc;
-  wire [31:0] instr_w; 
+  wire [31:0] instr_w;
   wire [63:0] mem_rdata;
 
-  wire [63:0] r31_val = reg_file.registers[31];
+  wire [63:0] r31_val   = reg_file.registers[31];
   wire [63:0] stack_top = r31_val - 64'd8;
 
   wire [63:0] mem_data_addr = (latch_is_return || latch_is_call)
@@ -138,22 +133,40 @@ module tinker_core (
       .read_data (mem_rdata)
   );
 
-  // writeback mux
   wire [63:0] wb_data =
       latch_is_load    ? mem_rdata :
       latch_is_mov_reg ? latch_data1 :
       latch_is_mov_imm ? ((latch_data1 & ~64'hFFF) | latch_imm) :
                          alu_result;
 
-  // fetch / PC
-  wire advance = (state == S0);  // advance PC only in S0
+  wire needS3 = latch_is_load || latch_is_store || latch_is_call || latch_is_return;
+  wire needS4 = latch_write && !latch_is_store && !latch_is_branch
+                  && !latch_is_jump && !latch_is_halt;
+
+  wire is_last_state = (state == S4) ||
+                       (state == S3 && !needS4) ||
+                       (state == S2 && !needS3 && !needS4);
+
+  wire branch_taken = latch_is_branch && alu_result[0];
+
+  wire advance =
+      !halted && (
+        (latch_is_call  && state == S2) ||
+        (is_last_state  && !latch_is_jump && !latch_is_halt && !branch_taken)
+      );
+
+  wire jump_en = !halted && (
+      (latch_is_jump && !latch_is_call && !latch_is_return && state == S2) ||
+      (latch_is_call   && state == S3) ||
+      (latch_is_return && state == S3)
+  );
 
   fetch fetch_inst (
       .clk        (clk),
       .reset      (reset),
       .halt       (halted),
       .advance    (advance),
-      .is_jump    (latch_is_jump && !halted && state == S2),
+      .is_jump    (jump_en),
       .is_branch  (latch_is_branch && !halted && state == S2),
       .is_brgt    (latch_is_brgt),
       .is_brr_reg (latch_is_brr_reg),
@@ -168,11 +181,7 @@ module tinker_core (
       .pc         (pc)
   );
 
-  // FSM — w latched signlas
-  wire needS3 = latch_is_load || latch_is_store || latch_is_call || latch_is_return;
-  wire needS4  = latch_write && !latch_is_store && !latch_is_branch
-                   && !latch_is_jump && !latch_is_halt;
-
+  // FSM
   always @(posedge clk) begin
     if (reset) begin
       state <= S0;
@@ -188,13 +197,12 @@ module tinker_core (
     end
   end
 
-  // latching
-  // S0: latch fetched instr
+  // S0: latch fetched instruction
   always @(posedge clk) begin
     if (state == S0 && !halted) IR <= instr_w;
   end
 
-  // S1: latch decoded ctrl signals & reg read values
+  // S1: latch decoded control signals and register values
   always @(posedge clk) begin
     if (state == S1 && !halted) begin
       latch_op         <= op_w;
@@ -226,7 +234,7 @@ module tinker_core (
     else if (latch_is_halt && state == S2) hlt <= 1;
   end
 
-  // r31 stack ptr init
+  // r31 stack pointer init
   always @(posedge clk) begin
     if (reset) reg_file.registers[31] <= MEM_SIZE;
   end
