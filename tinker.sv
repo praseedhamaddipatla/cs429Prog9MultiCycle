@@ -31,10 +31,10 @@ module tinker_core (
   reg is_brgt_r, is_brr_reg_r, is_brr_imm_r;
 
   // state trans
-
   wire needS3 = is_load_r || is_store_r || is_call_r || is_return_r;
   wire needS4 = write_r && !is_store_r && !is_branch_r && !is_jump_r && !is_halt_r;
 
+  // return must go S3->S4 so PC redirect can happen at S4 after mem_rdata is ready
   always @(posedge clk) begin
     if (reset) state <= S0;
     else if (!hlt) begin
@@ -42,7 +42,7 @@ module tinker_core (
         S0: state <= S1;
         S1: state <= S2;
         S2: state <= needS3 ? S3 : needS4 ? S4 : S0;
-        S3: state <= needS4 ? S4 : S0;
+        S3: state <= (needS4 || is_return_r) ? S4 : S0;
         S4: state <= S0;
       endcase
     end
@@ -124,18 +124,16 @@ module tinker_core (
       .result(alu_result)
   );
 
-  // mem
-
+  // mem address
   wire [63:0] mem_data_addr = (is_return_r || is_call_r) ? stack_top : (data1 + immediate);
 
-  // add pc latch
-  reg  [63:0] pc_latch;
+  // pc latch captured at S1
+  reg [63:0] pc_latch;
 
   always @(posedge clk) begin
     if (state == S1) pc_latch <= pc;
   end
 
-  // change mem_write_val to use pc_latch
   wire [63:0] mem_write_val = is_call_r ? (pc_latch + 64'd4) : data2;
 
   wire mem_we = (is_store_r || is_call_r) && (state == S3) && !hlt;
@@ -152,20 +150,14 @@ module tinker_core (
       .read_data(mem_rdata)
   );
 
-  // writeback
-
+  // writeback mux
   wire [63:0] wb_data =
       is_load_r    ? mem_rdata :
       is_mov_reg_r ? data1 :
       is_mov_imm_r ? ((data1 & ~64'hFFF) | immediate) :
                      alu_result;
 
-
-  // PC advance ctrl
-
   wire advance = (state == S2) && !hlt && !is_branch_r && !is_jump_r && !is_call_r && !is_return_r;
-
-  wire jump_at_s2 = is_jump_r && !is_call_r && !is_return_r && (state == S2);
 
   fetch fetch_inst (
       .clk(clk),
@@ -173,13 +165,15 @@ module tinker_core (
       .halt(hlt),
       .advance(advance),
 
-      .is_jump(jump_at_s2),
-      .is_branch(is_branch_r && state == S2),
-      .is_brgt(is_brgt_r),
+      .is_jump  (is_jump_r   && (state == S2)),
+      .is_branch(is_branch_r && (state == S2)),
+      .is_brgt  (is_brgt_r),
       .is_brr_reg(is_brr_reg_r),
       .is_brr_imm(is_brr_imm_r),
-      .is_return(is_return_r && state == S3),
-      .is_call(is_call_r && state == S3),
+      // return redirects at S4 (mem_rdata now valid)
+      .is_return(is_return_r && (state == S4)),
+      // call redirects at S2 (is_jump_r already set, is_call tells fetch which mux path)
+      .is_call  (is_call_r   && (state == S2)),
 
       .branch_cond(alu_result[0]),
       .data1(data1),
