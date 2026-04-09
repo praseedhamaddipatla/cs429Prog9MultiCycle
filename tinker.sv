@@ -22,7 +22,6 @@ module tinker_core (
   reg [2:0] state;
 
   // ctrl signal latches
-
   reg is_load_r, is_store_r, is_call_r;
   reg is_branch_r, is_jump_r, is_halt_r;
   reg write_r, is_return_r;
@@ -31,7 +30,6 @@ module tinker_core (
   reg is_brgt_r, is_brr_reg_r, is_brr_imm_r;
 
   // state trans
-
   wire needS3 = is_load_r || is_store_r || is_call_r || is_return_r;
   wire needS4 = write_r && !is_store_r && !is_branch_r && !is_jump_r && !is_halt_r;
 
@@ -49,9 +47,7 @@ module tinker_core (
   end
 
   // IR latch
-
   reg [31:0] IR;
-
   always @(posedge clk) begin
     if (state == S0) IR <= instr;
   end
@@ -59,7 +55,6 @@ module tinker_core (
   wire [31:0] dec_instr = (state == S0) ? instr : IR;
 
   // wires
-
   wire [63:0] pc;
   wire [31:0] instr;
 
@@ -80,7 +75,6 @@ module tinker_core (
   wire [63:0] mem_rdata;
 
   // latch ctrl
-
   always @(posedge clk) begin
     if (state == S1) begin
       is_load_r    <= is_load;
@@ -94,7 +88,6 @@ module tinker_core (
       is_mov_reg_r <= is_mov_reg;
       is_mov_imm_r <= is_mov_imm;
 
-      // NEW
       is_brgt_r    <= is_brgt;
       is_brr_reg_r <= is_brr_reg;
       is_brr_imm_r <= is_brr_imm;
@@ -102,19 +95,22 @@ module tinker_core (
   end
 
   // halt
-
   always @(posedge clk) begin
     if (reset) hlt <= 0;
     else if (is_halt_r) hlt <= 1;
   end
 
   // stack ptr
-
   wire [63:0] r31_val = reg_file.registers[31];
-  wire [63:0] stack_top = r31_val - 64'd8;
+
+  reg [63:0] sp_latch;
+  always @(posedge clk) begin
+    if (state == S1) sp_latch <= r31_val;
+  end
+
+  wire [63:0] stack_top = sp_latch - 64'd8;
 
   // alu
-
   wire [63:0] alu_a = is_brgt_r ? data2 : data1;
   wire [63:0] alu_b = is_brgt_r ? data3 : (use_imm ? immediate : data2);
 
@@ -126,18 +122,17 @@ module tinker_core (
   );
 
   // mem
+  wire [63:0] mem_data_addr =
+      (is_return_r || is_call_r) ? stack_top : (data1 + immediate);
 
-  wire [63:0] mem_data_addr = (is_return_r || is_call_r) ? stack_top : (data1 + immediate);
-
-  // add pc latch
-  reg  [63:0] pc_latch;
-
+  // PC latch
+  reg [63:0] pc_latch;
   always @(posedge clk) begin
     if (state == S1) pc_latch <= pc;
   end
 
-  // change mem_write_val to use pc_latch
-  wire [63:0] mem_write_val = is_call_r ? (pc_latch + 64'd4) : data2;
+  wire [63:0] mem_write_val =
+      is_call_r ? (pc_latch + 64'd4) : data2;
 
   wire mem_we = (is_store_r || is_call_r) && (state == S3) && !hlt;
 
@@ -154,27 +149,29 @@ module tinker_core (
   );
 
   // writeback
-
   wire [63:0] wb_data =
-    is_call_r   ? (r31_val - 64'd8) :
-    is_return_r ? (r31_val + 64'd8) :
-    is_load_r    ? mem_rdata_reg :
-    is_mov_reg_r ? data1 :
-    is_mov_imm_r ? ((data1 & ~64'hFFF) | immediate) :
-                   alu_result;
-
+      is_load_r    ? mem_rdata :
+      is_mov_reg_r ? data1 :
+      is_mov_imm_r ? ((data1 & ~64'hFFF) | immediate) :
+                     alu_result;
 
   // PC advance ctrl
+  wire advance =
+      (state == S2) &&
+      !hlt &&
+      !is_branch_r &&
+      !is_jump_r &&
+      !is_call_r &&
+      !is_return_r;
 
-  wire advance = (state == S2) && !hlt && !is_branch_r && !is_jump_r && !is_call_r && !is_return_r;
-
+  // latch memory only for return
   reg [63:0] mem_rdata_r;
   always @(posedge clk) begin
-    if (state == S3) mem_rdata_r <= mem_rdata;
+    if (state == S3 && is_return_r)
+      mem_rdata_r <= mem_rdata;
   end
 
   // fetch
-
   fetch fetch_inst (
       .clk(clk),
       .reset(reset),
@@ -186,19 +183,21 @@ module tinker_core (
       .is_brgt(is_brgt_r),
       .is_brr_reg(is_brr_reg_r),
       .is_brr_imm(is_brr_imm_r),
+
       .is_return(is_return_r && state == S4),
-      .is_call(is_call_r && state == S4),
+      .is_call(is_call_r && state == S2), // ← matches friend
 
       .branch_cond(alu_result[0]),
       .data1(data1),
       .data2(data2),
       .immediate(immediate),
-      .mem_rdata(mem_rdata_reg),
+
+      .mem_rdata(is_return_r ? mem_rdata_r : mem_rdata),
+
       .pc(pc)
   );
 
   // decoder
-
   decoder dec_inst (
       .instr(dec_instr),
       .raddr1(raddr1),
@@ -224,26 +223,21 @@ module tinker_core (
   );
 
   // regfile
-
   reg_file reg_file (
       .clk(clk),
       .reset(reset),
       .raddr1(raddr1),
       .raddr2(raddr2),
       .raddr3(rt_addr),
-      .waddr((is_call_r || is_return_r) ? 5'd31 : waddr),
+      .waddr(waddr),
       .data(wb_data),
-      .write(
-        ((write_r && (state == S4)) || 
-        (is_call_r && state == S4) || 
-        (is_return_r && state == S4)) && !hlt),
+      .write(write_r && (state == S4) && !hlt),
       .r1(data1),
       .r2(data2),
       .r3(data3)
   );
 
   // init stack ptr
-
   always @(posedge clk) begin
     if (reset) reg_file.registers[31] <= `MEM_SIZE;
   end
