@@ -34,6 +34,7 @@ module tinker_core (
   wire needS3 = is_load_r || is_store_r || is_call_r || is_return_r;
   wire needS4 = write_r && !is_store_r && !is_branch_r && !is_jump_r && !is_halt_r;
 
+  // return must pass through S4 so PC redirect fires after mem_rdata is valid
   always @(posedge clk) begin
     if (reset) state <= S0;
     else if (!hlt) begin
@@ -106,9 +107,7 @@ module tinker_core (
     else if (is_halt_r) hlt <= 1;
   end
 
-  // stack ptr
-
-  wire [63:0] r31_val = reg_file.registers[31];
+  wire [63:0] r31_val  = reg_file.registers[31];
   wire [63:0] stack_top = r31_val - 64'd8;
 
   // alu
@@ -126,19 +125,16 @@ module tinker_core (
   // mem address
   wire [63:0] mem_data_addr = (is_return_r || is_call_r) ? stack_top : (data1 + immediate);
 
-  reg [63:0] pc_latch;
+  // pc_latch: capture the PC of the current instruction at S1.
 
+  reg [63:0] pc_latch;
   always @(posedge clk) begin
-    if (state == S0) pc_latch <= pc;
+    if (state == S1) pc_latch <= pc;
   end
 
   wire [63:0] mem_write_val = is_call_r ? (pc_latch + 64'd4) : data2;
 
-  reg mem_we_r;
-  always @(posedge clk) begin
-    if (reset) mem_we_r <= 0;
-    else mem_we_r <= (is_store_r || is_call_r) && (state == S3) && !hlt;
-  end
+  wire mem_we = (is_store_r || is_call_r) && (state == S3) && !hlt;
 
   mem_module #(
       .MEM_SIZE(`MEM_SIZE)
@@ -148,7 +144,7 @@ module tinker_core (
       .instr_out(instr),
       .data_addr(mem_data_addr),
       .write_data(mem_write_val),
-      .we(mem_we_r),
+      .we(mem_we),
       .read_data(mem_rdata)
   );
 
@@ -159,9 +155,10 @@ module tinker_core (
       is_mov_imm_r ? ((data1 & ~64'hFFF) | immediate) :
                      alu_result;
 
-  // advance: normal PC+4 for instructions that don't redirect
+  // advance: normal PC+4; suppressed for anything that redirects PC
   wire advance = (state == S2) && !hlt && !is_branch_r && !is_jump_r && !is_call_r && !is_return_r;
 
+  // fetch
 
   fetch fetch_inst (
       .clk(clk),
@@ -169,13 +166,13 @@ module tinker_core (
       .halt(hlt),
       .advance(advance),
 
-      .is_jump  (is_jump_r   && (state == S2)),
-      .is_branch(is_branch_r && (state == S2)),
+      .is_jump  (is_jump_r    && (state == S2)),
+      .is_branch(is_branch_r  && (state == S2)),
       .is_brgt  (is_brgt_r),
       .is_brr_reg(is_brr_reg_r),
       .is_brr_imm(is_brr_imm_r),
-      .is_return(is_return_r && (state == S4)),
-      .is_call  (is_call_r   && (state == S2)),
+      .is_return(is_return_r  && (state == S4)),
+      .is_call  (is_call_r    && (state == S2)),
 
       .branch_cond(alu_result[0]),
       .data1(data1),
@@ -226,11 +223,5 @@ module tinker_core (
       .r2(data2),
       .r3(data3)
   );
-
-  // init stack ptr
-
-  always @(posedge clk) begin
-    if (reset) reg_file.registers[31] <= `MEM_SIZE;
-  end
 
 endmodule
