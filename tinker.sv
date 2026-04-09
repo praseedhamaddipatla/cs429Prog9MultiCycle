@@ -10,7 +10,7 @@
 module tinker_core (
     input clk,
     input reset,
-    output reg hlt
+    output logic hlt
 );
 
   parameter S0 = 3'd0;
@@ -18,14 +18,6 @@ module tinker_core (
   parameter S2 = 3'd2;
   parameter S3 = 3'd3;
   parameter S4 = 3'd4;
-  /*
-  typedef enum logic [2:0] {
-    S0, //fetch
-    S1, //decode
-    S2, //alu
-    S3, //ld/store
-    S4 //writeback
-  } state_t;*/
 
   reg [2:0] state;
 
@@ -164,15 +156,22 @@ module tinker_core (
   // writeback
 
   wire [63:0] wb_data =
-      is_load_r    ? mem_rdata :
-      is_mov_reg_r ? data1 :
-      is_mov_imm_r ? ((data1 & ~64'hFFF) | immediate) :
-                     alu_result;
+    is_call_r   ? (r31_val - 64'd8) :
+    is_return_r ? (r31_val + 64'd8) :
+    is_load_r    ? mem_rdata_reg :
+    is_mov_reg_r ? data1 :
+    is_mov_imm_r ? ((data1 & ~64'hFFF) | immediate) :
+                   alu_result;
 
 
   // PC advance ctrl
 
   wire advance = (state == S2) && !hlt && !is_branch_r && !is_jump_r && !is_call_r && !is_return_r;
+
+  reg [63:0] mem_rdata_r;
+  always @(posedge clk) begin
+    if (state == S3) mem_rdata_r <= mem_rdata;
+  end
 
   // fetch
 
@@ -187,14 +186,14 @@ module tinker_core (
       .is_brgt(is_brgt_r),
       .is_brr_reg(is_brr_reg_r),
       .is_brr_imm(is_brr_imm_r),
-      .is_return(is_return_r && state == S3),
-      .is_call(is_call_r && state == S3),
+      .is_return(is_return_r && state == S4),
+      .is_call(is_call_r && state == S4),
 
       .branch_cond(alu_result[0]),
       .data1(data1),
       .data2(data2),
       .immediate(immediate),
-      .mem_rdata(mem_rdata),
+      .mem_rdata(mem_rdata_reg),
       .pc(pc)
   );
 
@@ -232,9 +231,12 @@ module tinker_core (
       .raddr1(raddr1),
       .raddr2(raddr2),
       .raddr3(rt_addr),
-      .waddr(waddr),
+      .waddr((is_call_r || is_return_r) ? 5'd31 : waddr),
       .data(wb_data),
-      .write(write_r && (state == S4) && !hlt),
+      .write(
+        ((write_r && (state == S4)) || 
+        (is_call_r && state == S4) || 
+        (is_return_r && state == S4)) && !hlt),
       .r1(data1),
       .r2(data2),
       .r3(data3)
