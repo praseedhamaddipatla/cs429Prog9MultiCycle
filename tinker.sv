@@ -17,11 +17,11 @@ module tinker_core (
   localparam MEM_SIZE = 512 * 1024;
 
   typedef enum logic [2:0] {
-    S0  = 3'd0,
-    S1  = 3'd1,
-    S2  = 3'd2,
-    S3  = 3'd3,
-    S4  = 3'd4
+    S0 = 3'd0,
+    S1 = 3'd1,
+    S2 = 3'd2,
+    S3 = 3'd3,
+    S4 = 3'd4
   } state_t;
 
   state_t state;
@@ -31,8 +31,8 @@ module tinker_core (
   reg [31:0] IR;  // latched in S0
 
   // latched decoder outputs
-  reg [ 4:0] latch_op;
-  reg [ 4:0] latch_waddr;
+  reg [4:0] latch_op;
+  reg [4:0] latch_waddr;
   reg [63:0] latch_imm;
   reg latch_use_imm;
   reg latch_write;
@@ -115,7 +115,7 @@ module tinker_core (
   wire [31:0] instr_w;
   wire [63:0] mem_rdata;
 
-  wire [63:0] r31_val   = reg_file.registers[31];
+  wire [63:0] r31_val = reg_file.registers[31];
   wire [63:0] stack_top = r31_val - 64'd8;
 
   wire [63:0] mem_data_addr = (latch_is_return || latch_is_call)
@@ -157,18 +157,24 @@ module tinker_core (
   wire branch_taken = latch_is_branch && alu_result[0];
 
   wire advance =
-      !halted && (
-        // call: advance in S2 so pc+4 is available as return address during S3 store
-        (latch_is_call && state == S2) ||
-        // all other sequential completions: last state, not a jump, not halt, not a taken branch
-        (is_last_state && !latch_is_jump && !latch_is_halt && !branch_taken)
-      );
+    !halted &&
+    (
+      (
+        (state == S2 && !needS3 && !needS4) ||
+        (state == S3 && !needS4) ||
+        (state == S4)
+      )
+      && !latch_is_jump
+      && !latch_is_call
+      && !latch_is_return
+      && !branch_taken
+    );
 
   wire jump_en = !halted && (
-      (latch_is_jump && !latch_is_call && !latch_is_return && state == S2) ||
-      (latch_is_call   && state == S3) ||
-      (latch_is_return && state == S3)
-  );
+    (latch_is_jump && state == S2) ||
+    (latch_is_call && state == S3) ||
+    (latch_is_return && state == S3)
+);
 
   fetch fetch_inst (
       .clk        (clk),
@@ -198,8 +204,16 @@ module tinker_core (
       case (state)
         S0: state <= S1;
         S1: state <= S2;
-        S2: state <= needS3 ? S3 : needS4 ? S4 : S0;
-        S3: state <= needS4 ? S4 : S0;
+        S2: begin
+          if (needS3) state <= S3;
+          else if (needS4) state <= S4;
+          else state <= S0;
+        end
+
+        S3: begin
+          if (needS4) state <= S4;
+          else state <= S0;
+        end
         S4: state <= S0;
         default: state <= S0;
       endcase
