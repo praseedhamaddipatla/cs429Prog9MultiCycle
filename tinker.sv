@@ -23,8 +23,6 @@ module tinker_core (
 
   state_t state;
 
-  wire halted = hlt;
-
   // LATCHED CONTROL SIGNALS
 
   reg is_load_r, is_store_r, is_call_r;
@@ -135,7 +133,7 @@ module tinker_core (
 
   wire [63:0] mem_write_val = is_call_r ? (pc + 64'd4) : data2;
 
-  wire mem_we = (is_store_r || is_call_r) && (state == S3) && !halted;
+  wire mem_we = (is_store_r || is_call_r) && (state == S3) && !hlt;
 
   mem_module #(
       .MEM_SIZE(`MEM_SIZE)
@@ -162,7 +160,7 @@ module tinker_core (
 
   wire advance =
       (state == S2) &&
-      !halted &&
+      !hlt &&
       !is_branch_r &&
       !is_jump_r &&
       !is_call_r &&
@@ -173,7 +171,7 @@ module tinker_core (
   fetch fetch_inst (
       .clk(clk),
       .reset(reset),
-      .halt(halted),
+      .halt(hlt),
       .advance(advance),
 
       .is_jump(is_jump_r && state == S2),
@@ -228,7 +226,7 @@ module tinker_core (
       .raddr3(rt_addr),
       .waddr(waddr),
       .data(wb_data),
-      .write(write_r && (state == S4) && !halted),
+      .write(write_r && (state == S4) && !hlt),
       .r1(data1),
       .r2(data2),
       .r3(data3)
