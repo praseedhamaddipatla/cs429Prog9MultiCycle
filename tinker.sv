@@ -10,7 +10,7 @@
 module tinker_core (
     input clk,
     input reset,
-    output logic hlt
+    output reg hlt
 );
 
   parameter S0 = 3'd0;
