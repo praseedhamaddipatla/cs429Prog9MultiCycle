@@ -41,7 +41,7 @@ module tinker_core (
 
   always @(posedge clk) begin
     if (reset) state <= S0;
-    else begin
+    else if (!hlt) begin
       case (state)
         S0: state <= S1;
         S1: state <= S2;
