@@ -13,15 +13,21 @@ module tinker_core (
     output logic hlt
 );
 
+parameter S0 = 3'd0;
+parameter S1 = 3'd1;
+parameter S2 = 3'd2;
+parameter S3 = 3'd3;
+parameter S4 = 3'd4;
+/*
   typedef enum logic [2:0] {
     S0, //fetch
     S1, //decode
     S2, //alu
     S3, //ld/store
     S4 //writeback
-  } state_t;
+  } state_t;*/
 
-  state_t state;
+  reg [2:0] state;
 
   // ctrl signal latches
 
