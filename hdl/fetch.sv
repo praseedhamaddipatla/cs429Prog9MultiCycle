@@ -32,28 +32,26 @@ module fetch (
   reg [63:0] pc_reg;
   assign pc = pc_reg;
 
-  // branch is taken if ALU says so (brnz/brgt) or if unconditional
+  // branch is taken if ALU says so (brnz/brgt) or if unconditional jump
   wire taken = (is_branch && branch_cond) || is_jump;
 
-  // next PC mux - all PC logic lives here
+  //mux
   wire [63:0] next_pc =
-      is_return              ? mem_rdata            :  // return
-      is_brr_imm             ? (pc_reg + immediate) :  // brr L
-      is_brr_reg             ? (pc_reg + data1)     :  // brr rd
-      (is_branch && is_brgt) ? data1                :  // brgt
-      is_branch              ? data2                :  // brnz
-                               data1;                  // br/call
+      is_return              ? mem_rdata            :  // return: target from stack
+      is_brr_imm             ? (pc_reg + immediate) :  // brr L: pc-relative imm
+      is_brr_reg             ? (pc_reg + data1)     :  // brr rd: pc-relative reg
+      (is_branch && is_brgt) ? data1                :  // brgt: target in rd
+      is_branch              ? data2                :  // brnz: target in rd (raddr2)
+                               data1;                  // br/call: target in rd
 
   always @(posedge clk) begin
     if (reset) begin
       pc_reg <= `PC_START;
     end else if (!halt) begin
       if (taken) begin
-        // bounds check: go to PC_START if oob
         if (next_pc >= `MEM_SIZE) pc_reg <= `PC_START;
         else pc_reg <= next_pc;
       end else if (advance) begin
-        // bounds check on sequential increment too
         if (pc_reg + 64'd4 >= `MEM_SIZE) pc_reg <= `PC_START;
         else pc_reg <= pc_reg + 64'd4;
       end
