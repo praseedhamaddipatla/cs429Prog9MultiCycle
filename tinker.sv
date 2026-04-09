@@ -34,7 +34,6 @@ module tinker_core (
   wire needS3 = is_load_r || is_store_r || is_call_r || is_return_r;
   wire needS4 = write_r && !is_store_r && !is_branch_r && !is_jump_r && !is_halt_r;
 
-  // return must go S3->S4 so PC redirect can happen at S4 after mem_rdata is ready
   always @(posedge clk) begin
     if (reset) state <= S0;
     else if (!hlt) begin
@@ -127,16 +126,19 @@ module tinker_core (
   // mem address
   wire [63:0] mem_data_addr = (is_return_r || is_call_r) ? stack_top : (data1 + immediate);
 
-  // pc latch captured at S1
   reg [63:0] pc_latch;
 
   always @(posedge clk) begin
-    if (state == S1) pc_latch <= pc;
+    if (state == S0) pc_latch <= pc;
   end
 
   wire [63:0] mem_write_val = is_call_r ? (pc_latch + 64'd4) : data2;
 
-  wire mem_we = (is_store_r || is_call_r) && (state == S3) && !hlt;
+  reg mem_we_r;
+  always @(posedge clk) begin
+    if (reset) mem_we_r <= 0;
+    else mem_we_r <= (is_store_r || is_call_r) && (state == S3) && !hlt;
+  end
 
   mem_module #(
       .MEM_SIZE(`MEM_SIZE)
@@ -146,7 +148,7 @@ module tinker_core (
       .instr_out(instr),
       .data_addr(mem_data_addr),
       .write_data(mem_write_val),
-      .we(mem_we),
+      .we(mem_we_r),
       .read_data(mem_rdata)
   );
 
@@ -157,7 +159,9 @@ module tinker_core (
       is_mov_imm_r ? ((data1 & ~64'hFFF) | immediate) :
                      alu_result;
 
+  // advance: normal PC+4 for instructions that don't redirect
   wire advance = (state == S2) && !hlt && !is_branch_r && !is_jump_r && !is_call_r && !is_return_r;
+
 
   fetch fetch_inst (
       .clk(clk),
@@ -170,9 +174,7 @@ module tinker_core (
       .is_brgt  (is_brgt_r),
       .is_brr_reg(is_brr_reg_r),
       .is_brr_imm(is_brr_imm_r),
-      // return redirects at S4 (mem_rdata now valid)
       .is_return(is_return_r && (state == S4)),
-      // call redirects at S2 (is_jump_r already set, is_call tells fetch which mux path)
       .is_call  (is_call_r   && (state == S2)),
 
       .branch_cond(alu_result[0]),
