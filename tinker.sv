@@ -14,16 +14,16 @@ module tinker_core (
 );
 
   typedef enum logic [2:0] {
-    S0,
-    S1,
-    S2,
-    S3,
-    S4
+    S0, //fetch
+    S1, //decode
+    S2, //alu
+    S3, //ld/store
+    S4 //writeback
   } state_t;
 
   state_t state;
 
-  // LATCHED CONTROL SIGNALS
+  // ctrl signal latches
 
   reg is_load_r, is_store_r, is_call_r;
   reg is_branch_r, is_jump_r, is_halt_r;
@@ -32,7 +32,7 @@ module tinker_core (
 
   reg is_brgt_r, is_brr_reg_r, is_brr_imm_r;
 
-  // STATE TRANSITION
+  // state trans
 
   wire needS3 = is_load_r || is_store_r || is_call_r || is_return_r;
   wire needS4 = write_r && !is_store_r && !is_branch_r && !is_jump_r && !is_halt_r;
@@ -50,7 +50,7 @@ module tinker_core (
     end
   end
 
-  // IR LATCH
+  // IR latch
 
   reg [31:0] IR;
 
@@ -60,7 +60,7 @@ module tinker_core (
 
   wire [31:0] dec_instr = (state == S0) ? instr : IR;
 
-  // WIRES
+  // wires
 
   wire [63:0] pc;
   wire [31:0] instr;
@@ -81,7 +81,7 @@ module tinker_core (
   wire [63:0] alu_result;
   wire [63:0] mem_rdata;
 
-  // LATCH CONTROL (S1)
+  // latch ctrl
 
   always @(posedge clk) begin
     if (state == S1) begin
@@ -103,19 +103,19 @@ module tinker_core (
     end
   end
 
-  // HALT
+  // halt
 
   always @(posedge clk) begin
     if (reset) hlt <= 0;
-    else if (is_halt_r && state == S2) hlt <= 1;
+    else if (is_halt_r) hlt <= 1;
   end
 
-  // STACK POINTER
+  // stack ptr
 
   wire [63:0] r31_val = reg_file.registers[31];
   wire [63:0] stack_top = r31_val - 64'd8;
 
-  // ALU
+  // alu
 
   wire [63:0] alu_a = is_brgt_r ? data2 : data1;
   wire [63:0] alu_b = is_brgt_r ? data3 : (use_imm ? immediate : data2);
@@ -127,7 +127,7 @@ module tinker_core (
       .result(alu_result)
   );
 
-  // MEMORY
+  // mem
 
   wire [63:0] mem_data_addr = (is_return_r || is_call_r) ? stack_top : (data1 + immediate);
 
@@ -147,7 +147,7 @@ module tinker_core (
       .read_data(mem_rdata)
   );
 
-  // WRITEBACK
+  // writeback
 
   wire [63:0] wb_data =
       is_load_r    ? mem_rdata :
@@ -156,7 +156,7 @@ module tinker_core (
                      alu_result;
 
 
-  // PC ADVANCE CONTROL
+  // PC advance ctrl
 
   wire advance =
       (state == S2) &&
@@ -166,7 +166,7 @@ module tinker_core (
       !is_call_r &&
       !is_return_r;
 
-  // FETCH
+  // fetch
 
   fetch fetch_inst (
       .clk(clk),
@@ -190,7 +190,7 @@ module tinker_core (
       .pc(pc)
   );
 
-  // DECODER
+  // decoder
 
   decoder dec_inst (
       .instr(dec_instr),
@@ -216,7 +216,7 @@ module tinker_core (
       .rt_addr(rt_addr)
   );
 
-  // REGFILE
+  // regfile
 
   reg_file reg_file (
       .clk(clk),
@@ -232,7 +232,7 @@ module tinker_core (
       .r3(data3)
   );
 
-  // INIT STACK POINTER
+  // init stack ptr
 
   always @(posedge clk) begin
     if (reset) reg_file.registers[31] <= `MEM_SIZE;
