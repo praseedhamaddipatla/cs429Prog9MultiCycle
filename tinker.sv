@@ -17,14 +17,20 @@ module tinker_core (
   parameter S3 = 3'd3;
   parameter S4 = 3'd4;
   reg [2:0] state;
+
   // ctrl signal latches
   reg is_load_r, is_store_r, is_call_r;
   reg is_branch_r, is_jump_r, is_halt_r;
   reg write_r, is_return_r;
   reg is_mov_reg_r, is_mov_imm_r;
   reg is_brgt_r, is_brr_reg_r, is_brr_imm_r;
+
   wire needS3 = is_load_r || is_store_r || is_call_r || is_return_r;
   wire needS4 = write_r && !is_store_r && !is_branch_r && !is_jump_r && !is_halt_r;
+
+  // For call/return we also need S4 to write back the updated SP
+  wire needS4_sp = is_call_r || is_return_r;
+
   always @(posedge clk) begin
     if (reset) state <= S0;
     else if (!hlt) begin
@@ -32,17 +38,19 @@ module tinker_core (
         S0: state <= S1;
         S1: state <= S2;
         S2: state <= needS3 ? S3 : needS4 ? S4 : S0;
-        S3: state <= (needS4 || is_return_r) ? S4 : S0;
+        S3: state <= (needS4 || needS4_sp || is_return_r) ? S4 : S0;
         S4: state <= S0;
       endcase
     end
   end
+
   // IR latch
   reg [31:0] IR;
   always @(posedge clk) begin
     if (state == S0) IR <= instr;
   end
   wire [31:0] dec_instr = (state == S0) ? instr : IR;
+
   // wires
   wire [63:0] pc;
   wire [31:0] instr;
@@ -60,6 +68,7 @@ module tinker_core (
   wire [63:0] data1, data2, data3;
   wire [63:0] alu_result;
   wire [63:0] mem_rdata;
+
   // latch ctrl at S1
   always @(posedge clk) begin
     if (state == S1) begin
@@ -69,7 +78,7 @@ module tinker_core (
       is_branch_r  <= is_branch;
       is_jump_r    <= is_jump;
       is_halt_r    <= is_halt;
-      write_r<= write;
+      write_r      <= write;
       is_return_r  <= is_return;
       is_mov_reg_r <= is_mov_reg;
       is_mov_imm_r <= is_mov_imm;
@@ -84,9 +93,9 @@ module tinker_core (
     else if (is_halt_r) hlt <= 1;
   end
 
-  // stack pointer — r31 initialised inside reg_file; no second driver here
-  wire [63:0] r31_val = reg_file.registers[31];
-  wire [63:0] stack_top = r31_val - 64'd8;
+  // Stack pointer — r31
+  wire [63:0] r31_val  = reg_file.registers[31];
+  wire [63:0] stack_top = r31_val - 64'd8;  // call writes here; return reads here
 
   // alu
   wire [63:0] alu_a = is_brgt_r ? data2 : data1;
@@ -99,7 +108,7 @@ module tinker_core (
       .result(alu_result)
   );
 
-  // PC latch — capture at S1 (advance hasn't fired yet, so pc == instr address)
+  // PC latch — capture at S1
   reg [63:0] pc_latch;
   always @(posedge clk) begin
     if (state == S1) pc_latch <= pc;
@@ -111,13 +120,12 @@ module tinker_core (
   always @(posedge clk) begin
     if (state == S2) begin
       if (is_call_r) begin
-        mem_addr_latch  <= stack_top;
+        mem_addr_latch  <= stack_top;       // write return addr to SP-8
         mem_wdata_latch <= pc_latch + 64'd4;
       end else if (is_return_r) begin
-        mem_addr_latch  <= stack_top;
+        mem_addr_latch  <= stack_top;       // read return addr from SP-8
         mem_wdata_latch <= 64'd0;
       end else begin
-        // load / store
         mem_addr_latch  <= data1 + immediate;
         mem_wdata_latch <= data2;
       end
@@ -139,18 +147,32 @@ module tinker_core (
       .read_data(mem_rdata)
   );
 
-  // latch mem read output at S3 for use at S4 (return needs this)
+  // Latch mem read output at end of S3 for use at S4
   reg [63:0] mem_out_reg;
   always @(posedge clk) begin
     if (state == S3) mem_out_reg <= mem_rdata;
   end
 
-  // writeback
-  wire [63:0] wb_data =
+  // Register file writeback mux
+
+  wire do_sp_writeback = (is_call_r || is_return_r) && (state == S4) && !hlt;
+
+  wire [63:0] wb_data_normal =
       is_load_r    ? mem_out_reg :
       is_mov_reg_r ? data1 :
       is_mov_imm_r ? ((data1 & ~64'hFFF) | immediate) :
                      alu_result;
+
+
+  wire [63:0] wb_data_sp =
+      is_call_r   ? (r31_val - 64'd8) :
+                    (r31_val + 64'd8);  // is_return_r
+
+  wire [4:0]  wb_addr  = do_sp_writeback ? 5'd31 : waddr;
+  wire [63:0] wb_data  = do_sp_writeback ? wb_data_sp : wb_data_normal;
+  wire        wb_write = do_sp_writeback ||
+                         (write_r && (state == S4) && !hlt &&
+                          !is_store_r && !is_branch_r && !is_jump_r && !is_halt_r);
 
   // advance
   wire advance = (state == S2) && !hlt && !is_branch_r && !is_jump_r && !is_call_r && !is_return_r;
@@ -161,8 +183,6 @@ module tinker_core (
       .halt(hlt),
       .advance(advance),
 
-      // call redirects at S2 (is_jump_r=1 for call from decoder)
-      // return redirects at S4 using latched mem_out_reg
       .is_jump   (is_jump_r   && (state == S2)),
       .is_branch (is_branch_r && (state == S2)),
       .is_brgt   (is_brgt_r),
@@ -209,9 +229,9 @@ module tinker_core (
       .raddr1(raddr1),
       .raddr2(raddr2),
       .raddr3(rt_addr),
-      .waddr(waddr),
+      .waddr(wb_addr),
       .data(wb_data),
-      .write(write_r && (state == S4) && !hlt),
+      .write(wb_write),
       .r1(data1),
       .r2(data2),
       .r3(data3)
