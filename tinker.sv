@@ -21,18 +21,19 @@ module tinker_core (
 
   wire halted = hlt;
 
-  // =========================
+  
   // LATCHED CONTROL SIGNALS
-  // =========================
+  
   reg is_load_r, is_store_r, is_call_r;
   reg is_branch_r, is_jump_r, is_halt_r;
-  reg write_r;
-  reg is_return_r;
+  reg write_r, is_return_r;
   reg is_mov_reg_r, is_mov_imm_r;
 
-  // =========================
-  // STATE TRANSITION CONTROL
-  // =========================
+  reg is_brgt_r, is_brr_reg_r, is_brr_imm_r;
+
+  
+  // STATE TRANSITION
+  
   wire needS3 = is_load_r || is_store_r || is_call_r || is_return_r;
   wire needS4 = write_r && !is_store_r && !is_branch_r && !is_jump_r && !is_halt_r;
 
@@ -49,9 +50,9 @@ module tinker_core (
     end
   end
 
-  // =========================
+  
   // IR LATCH
-  // =========================
+  
   reg [31:0] IR;
 
   always @(posedge clk) begin
@@ -60,9 +61,9 @@ module tinker_core (
 
   wire [31:0] dec_instr = (state == S0) ? instr : IR;
 
-  // =========================
+  
   // WIRES
-  // =========================
+  
   wire [63:0] pc;
   wire [31:0] instr;
 
@@ -82,9 +83,9 @@ module tinker_core (
   wire [63:0] alu_result;
   wire [63:0] mem_rdata;
 
-  // =========================
-  // LATCH CONTROL SIGNALS (S1)
-  // =========================
+  
+  // LATCH CONTROL (S1)
+  
   always @(posedge clk) begin
     if (state == S1) begin
       is_load_r   <= is_load;
@@ -97,28 +98,33 @@ module tinker_core (
       is_return_r <= is_return;
       is_mov_reg_r <= is_mov_reg;
       is_mov_imm_r <= is_mov_imm;
+
+      // NEW
+      is_brgt_r    <= is_brgt;
+      is_brr_reg_r <= is_brr_reg;
+      is_brr_imm_r <= is_brr_imm;
     end
   end
 
-  // =========================
+  
   // HALT
-  // =========================
+  
   always @(posedge clk) begin
     if (reset) hlt <= 0;
     else if (is_halt_r && state == S2) hlt <= 1;
   end
 
-  // =========================
+  
   // STACK POINTER
-  // =========================
+  
   wire [63:0] r31_val = reg_file.registers[31];
   wire [63:0] stack_top = r31_val - 64'd8;
 
-  // =========================
+  
   // ALU
-  // =========================
-  wire [63:0] alu_a = is_brgt ? data2 : data1;
-  wire [63:0] alu_b = is_brgt ? data3 : (use_imm ? immediate : data2);
+  
+  wire [63:0] alu_a = is_brgt_r ? data2 : data1;
+  wire [63:0] alu_b = is_brgt_r ? data3 : (use_imm ? immediate : data2);
 
   alu alu_inst (
       .a(alu_a),
@@ -127,9 +133,9 @@ module tinker_core (
       .result(alu_result)
   );
 
-  // =========================
+  
   // MEMORY
-  // =========================
+  
   wire [63:0] mem_data_addr =
       (is_return_r || is_call_r) ? stack_top : (data1 + immediate);
 
@@ -149,29 +155,43 @@ module tinker_core (
       .read_data(mem_rdata)
   );
 
-  // =========================
+  
   // WRITEBACK
-  // =========================
+  
   wire [63:0] wb_data =
       is_load_r    ? mem_rdata :
       is_mov_reg_r ? data1 :
       is_mov_imm_r ? ((data1 & ~64'hFFF) | immediate) :
                      alu_result;
 
-  // =========================
+  
+  // PC ADVANCE CONTROL
+  
+  wire advance =
+      (state == S2) &&
+      !halted &&
+      !is_branch_r &&
+      !is_jump_r &&
+      !is_call_r &&
+      !is_return_r;
+
+  
   // FETCH
-  // =========================
+  
   fetch fetch_inst (
       .clk(clk),
       .reset(reset),
       .halt(halted),
+      .advance(advance),
+
       .is_jump(is_jump_r && state == S2),
       .is_branch(is_branch_r && state == S2),
-      .is_brgt(is_brgt),
-      .is_brr_reg(is_brr_reg),
-      .is_brr_imm(is_brr_imm),
-      .is_return(is_return_r),
-      .is_call(is_call_r),
+      .is_brgt(is_brgt_r),
+      .is_brr_reg(is_brr_reg_r),
+      .is_brr_imm(is_brr_imm_r),
+      .is_return(is_return_r && state == S2),
+      .is_call(is_call_r && state == S2),
+
       .branch_cond(alu_result[0]),
       .data1(data1),
       .data2(data2),
@@ -180,9 +200,9 @@ module tinker_core (
       .pc(pc)
   );
 
-  // =========================
+  
   // DECODER
-  // =========================
+  
   decoder dec_inst (
       .instr(dec_instr),
       .raddr1(raddr1),
@@ -207,9 +227,9 @@ module tinker_core (
       .rt_addr(rt_addr)
   );
 
-  // =========================
+  
   // REGFILE
-  // =========================
+  
   reg_file reg_file (
       .clk(clk),
       .reset(reset),
@@ -224,9 +244,9 @@ module tinker_core (
       .r3(data3)
   );
 
-  // =========================
+  
   // INIT STACK POINTER
-  // =========================
+  
   always @(posedge clk) begin
     if (reset) reg_file.registers[31] <= `MEM_SIZE;
   end
