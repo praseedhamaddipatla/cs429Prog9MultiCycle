@@ -5,26 +5,24 @@ module fetch (
     input halt,
     input advance,
 
-    // decoded instr type
+    // decoded instr type — all gated by state in tinker_core
     input is_jump,
     input is_branch,
     input is_brgt,
     input is_brr_reg,
     input is_brr_imm,
-    input is_return,
+    input is_return,   // fires only at S4 from tinker_core
     input is_call,
 
     // branch condition from ALU (1 = taken)
     input branch_cond,
 
-    // register values for target computation from regfile
-    input [63:0] data1,  // raddr1 value
-    input [63:0] data2,  // raddr2 value
-
-    // immediate from decoder
+    // register values
+    input [63:0] data1,
+    input [63:0] data2,
     input [63:0] immediate,
 
-    // return address popped from stack
+    // return address from stack (mem_out_reg, stable at S4)
     input [63:0] mem_rdata,
 
     output [63:0] pc
@@ -32,23 +30,24 @@ module fetch (
   reg [63:0] pc_reg;
   assign pc = pc_reg;
 
-  // branch is taken if ALU says so (brnz/brgt) or if unconditional jump
   wire taken = (is_branch && branch_cond) || is_jump;
 
-  //mux
   wire [63:0] next_pc =
-      is_return              ? mem_rdata            :  // return: target from stack
-      is_brr_imm             ? (pc_reg + immediate) :  // brr L: pc-relative imm
-      is_brr_reg             ? (pc_reg + data1)     :  // brr rd: pc-relative reg
-      (is_branch && is_brgt) ? data1                :  // brgt: target in rd
-      is_branch              ? data2                :  // brnz: target in rd (raddr2)
-                               data1;                  // br/call: target in rd
+      is_brr_imm             ? (pc_reg + immediate) :
+      is_brr_reg             ? (pc_reg + data1)     :
+      (is_branch && is_brgt) ? data1                :
+      is_branch              ? data2                :
+                               data1;               // br / call
 
   always @(posedge clk) begin
     if (reset) begin
       pc_reg <= `PC_START;
     end else if (!halt) begin
-      if (taken) begin
+      if (is_return) begin
+        // return redirect — fires at S4, mem_rdata is mem_out_reg (stable)
+        if (mem_rdata >= `MEM_SIZE) pc_reg <= `PC_START;
+        else pc_reg <= mem_rdata;
+      end else if (taken) begin
         if (next_pc >= `MEM_SIZE) pc_reg <= `PC_START;
         else pc_reg <= next_pc;
       end else if (advance) begin
