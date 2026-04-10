@@ -168,7 +168,6 @@ module tinker_core (
   wire [63:0] r31_val = reg_file.registers[31];
   wire [63:0] stack_top = r31_val - 64'd8;
 
-  // ✅ FIXED ADDRESS
   wire [63:0] mem_data_addr =
       (is_call_r || is_return_r) ? stack_top :
       (a_reg + imm_reg);
@@ -204,9 +203,13 @@ module tinker_core (
       !is_call_r && !is_return_r;
 
   // ================= FETCH CONTROL =================
+  // FIX: added !is_call_r to the S3 advance condition.
+  // call redirects the PC in S2 via is_call; if advance also fires in S3
+  // the fetch unit double-advances past the redirect target, causing the
+  // simulation to spin and the stack write to be lost.
   wire advance =
       (state == S4) ||
-      (state == S3 && !is_load_r && !is_return_r) ||
+      (state == S3 && !is_load_r && !is_return_r && !is_call_r) ||
       (state == S2 &&
        !is_load_r && !is_store_r && !is_call_r && !is_return_r &&
        !(write_r && !is_branch_r));
