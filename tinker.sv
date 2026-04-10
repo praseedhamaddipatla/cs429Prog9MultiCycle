@@ -65,11 +65,6 @@ module tinker_core (
   reg is_mov_reg_r, is_mov_imm_r;
   reg is_brgt_r, is_brr_reg_r, is_brr_imm_r;
 
-  // ================= LATCHED MEM ADDR/DATA =================
-  // Latched at end of S2 so mem_module sees fully stable inputs during S3.
-  reg [63:0] mem_addr_r;
-  reg [63:0] mem_wdata_r;
-
   // ================= STATE =================
   always @(posedge clk) begin
     if (reset) state <= S0;
@@ -101,7 +96,7 @@ module tinker_core (
     endcase
   end
 
-  // ================= FETCH =================
+  // ================= IR LATCH =================
   always @(posedge clk) begin
     if (state == S0) begin
       IR     <= instr;
@@ -114,10 +109,10 @@ module tinker_core (
   // ================= CONTROL LATCH =================
   always @(posedge clk) begin
     if (reset) begin
-      write_r      <= 0; use_imm_r   <= 0;
-      is_load_r    <= 0; is_store_r  <= 0;
-      is_branch_r  <= 0; is_jump_r   <= 0;
-      is_call_r    <= 0; is_return_r <= 0;
+      write_r      <= 0; use_imm_r    <= 0;
+      is_load_r    <= 0; is_store_r   <= 0;
+      is_branch_r  <= 0; is_jump_r    <= 0;
+      is_call_r    <= 0; is_return_r  <= 0;
       is_halt_r    <= 0;
       is_mov_reg_r <= 0; is_mov_imm_r <= 0;
       is_brgt_r    <= 0; is_brr_reg_r <= 0; is_brr_imm_r <= 0;
@@ -166,35 +161,29 @@ module tinker_core (
     if (state == S2) c_reg <= alu_result;
   end
 
-  // ================= MEMORY ADDRESS / DATA LATCH =================
-  // r31 is stable throughout; compute stack_top combinationally.
+  // ================= MEMORY =================
+  // Match reference exactly: combinational address/data, gated write-enable.
   wire [63:0] r31_val   = reg_file.registers[31];
   wire [63:0] stack_top = r31_val - 64'd8;
 
-  // Next-cycle address and write-data (evaluated while in S2)
-  wire [63:0] mem_data_addr_next =
+  // data_addr: combinational, stable throughout S3
+  wire [63:0] mem_data_addr =
       (is_call_r || is_return_r) ? stack_top : (a_reg + imm_reg);
 
-  wire [63:0] mem_wdata_next =
+  // write data: for call, save the return address (pc of call instr + 4)
+  // pc_reg is the pipeline-latched PC of the current instruction (stable)
+  wire [63:0] mem_wdata =
       is_call_r ? (pc_reg + 64'd4) : b_reg;
 
-  // Latch on the posedge that transitions S2→S3
-  always @(posedge clk) begin
-    if (state == S2) begin
-      mem_addr_r  <= mem_data_addr_next;
-      mem_wdata_r <= mem_wdata_next;
-    end
-  end
-
-  // ================= MEMORY =================
+  // write enable: only in S3, only for store or call
   wire mem_we = (state == S3) && (is_store_r || is_call_r);
 
   mem_module #(.MEM_SIZE(`MEM_SIZE)) memory (
       .clk(clk),
       .fetch_addr(pc),
       .instr_out(instr),
-      .data_addr(mem_addr_r),    // stable registered address
-      .write_data(mem_wdata_r),  // stable registered write data
+      .data_addr(mem_data_addr),
+      .write_data(mem_wdata),
       .we(mem_we),
       .read_data(mem_rdata)
   );
@@ -215,8 +204,9 @@ module tinker_core (
       !is_call_r && !is_return_r;
 
   // ================= FETCH CONTROL =================
-  // !is_call_r: call already redirected PC in S2 via is_call port;
-  // allowing advance in S3 would double-advance past the branch target.
+  // advance must NOT fire in S3 for call: the PC was already redirected in
+  // S2 via is_call; a second advance would corrupt it.
+  // advance must NOT fire in S3 for return: PC redirect happens in S4.
   wire advance =
       (state == S4) ||
       (state == S3 && !is_load_r && !is_return_r && !is_call_r) ||
@@ -224,24 +214,27 @@ module tinker_core (
        !is_load_r && !is_store_r && !is_call_r && !is_return_r &&
        !(write_r && !is_branch_r));
 
+  // is_jump_r is set for both br/call AND return by the decoder.
+  // Gate out return here (return redirects via is_return at S4, not is_jump at S2).
+  // Gate out call separately via is_call so fetch uses is_call path.
   fetch fetch_inst (
       .clk(clk),
       .reset(reset),
       .halt(hlt),
       .advance(advance),
 
-      .is_jump(is_jump_r && !is_return_r && (state == S2)),
+      .is_jump  (is_jump_r && !is_return_r && !is_call_r && (state == S2)),
       .is_branch(is_branch_r && (state == S2)),
-      .is_brgt(is_brgt_r),
+      .is_brgt  (is_brgt_r),
       .is_brr_reg(is_brr_reg_r),
       .is_brr_imm(is_brr_imm_r),
 
       .is_return(is_return_r && (state == S4)),
-      .is_call(is_call_r && (state == S2)),
+      .is_call  (is_call_r   && (state == S2)),
 
       .branch_cond(alu_result[0]),
-      .data1(a_reg),
-      .data2(b_reg),
+      .data1   (a_reg),
+      .data2   (b_reg),
       .immediate(imm_reg),
       .mem_rdata(mem_out_reg),
       .pc(pc)
@@ -249,42 +242,42 @@ module tinker_core (
 
   // ================= DECODER =================
   decoder dec_inst (
-      .instr(dec_instr),
-      .raddr1(raddr1),
-      .raddr2(raddr2),
-      .waddr(waddr),
+      .instr   (dec_instr),
+      .raddr1  (raddr1),
+      .raddr2  (raddr2),
+      .waddr   (waddr),
       .immediate(immediate),
-      .op(op),
-      .use_imm(use_imm),
-      .write(write),
-      .is_load(is_load),
+      .op      (op),
+      .use_imm (use_imm),
+      .write   (write),
+      .is_load (is_load),
       .is_store(is_store),
       .is_branch(is_branch),
-      .is_brgt(is_brgt),
-      .is_jump(is_jump),
+      .is_brgt (is_brgt),
+      .is_jump (is_jump),
       .is_brr_reg(is_brr_reg),
       .is_brr_imm(is_brr_imm),
       .is_return(is_return),
-      .is_call(is_call),
-      .is_halt(is_halt),
+      .is_call (is_call),
+      .is_halt (is_halt),
       .is_mov_reg(is_mov_reg),
       .is_mov_imm(is_mov_imm),
-      .rt_addr(rt_addr)
+      .rt_addr (rt_addr)
   );
 
   // ================= REGFILE =================
   reg_file reg_file (
-      .clk(clk),
-      .reset(reset),
+      .clk   (clk),
+      .reset (reset),
       .raddr1(raddr1),
       .raddr2(raddr2),
       .raddr3(rt_addr),
-      .waddr(waddr),
-      .data(wb_data),
-      .write(reg_we),
-      .r1(data1),
-      .r2(data2),
-      .r3(data3)
+      .waddr (waddr),
+      .data  (wb_data),
+      .write (reg_we),
+      .r1    (data1),
+      .r2    (data2),
+      .r3    (data3)
   );
 
 endmodule
