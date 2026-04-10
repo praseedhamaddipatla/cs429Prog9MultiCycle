@@ -14,11 +14,11 @@ module tinker_core (
 );
 
   // ================= STATES =================
-  parameter S0 = 3'd0; // FETCH
-  parameter S1 = 3'd1; // DECODE
-  parameter S2 = 3'd2; // EXEC
-  parameter S3 = 3'd3; // MEM
-  parameter S4 = 3'd4; // WB
+  parameter S0 = 3'd0;  // FETCH
+  parameter S1 = 3'd1;  // DECODE
+  parameter S2 = 3'd2;  // EXEC
+  parameter S3 = 3'd3;  // MEM
+  parameter S4 = 3'd4;  // WB
 
   reg [2:0] state, next_state;
 
@@ -29,7 +29,7 @@ module tinker_core (
   // ================= DECODE =================
   wire [4:0] raddr1, raddr2, waddr;
   wire [63:0] immediate;
-  wire [4:0] op;
+  wire [ 4:0] op;
   wire use_imm, write;
   wire is_load, is_store;
   wire is_branch, is_brgt, is_jump;
@@ -48,11 +48,11 @@ module tinker_core (
 
   // ================= MEMORY =================
   wire [63:0] mem_rdata;
-  reg [63:0] mem_out_reg;
+  reg  [63:0] mem_out_reg;
 
   // ================= PIPELINE REGS =================
-  reg [31:0] IR;
-  reg [63:0] pc_reg;
+  reg  [31:0] IR;
+  reg  [63:0] pc_reg;
   reg [63:0] a_reg, b_reg, c_reg;
   reg [63:0] imm_reg;
 
@@ -78,19 +78,14 @@ module tinker_core (
       S1: next_state = S2;
 
       S2: begin
-        if (is_load_r || is_store_r || is_call_r || is_return_r)
-          next_state = S3;
-        else if (write_r && !is_branch_r)
-          next_state = S4;
-        else
-          next_state = S0;
+        if (is_load_r || is_store_r || is_call_r || is_return_r) next_state = S3;
+        else if (write_r && !is_branch_r) next_state = S4;
+        else next_state = S0;
       end
 
       S3: begin
-        if (is_load_r || is_return_r)
-          next_state = S4;
-        else
-          next_state = S0;
+        if (is_load_r || is_return_r) next_state = S4;
+        else next_state = S0;
       end
 
       S4: next_state = S0;
@@ -110,14 +105,20 @@ module tinker_core (
   // ================= CONTROL LATCH =================
   always @(posedge clk) begin
     if (reset) begin
-      write_r <= 0; is_load_r <= 0; is_store_r <= 0;
-      is_branch_r <= 0; is_jump_r <= 0;
-      is_call_r <= 0; is_return_r <= 0;
+      write_r <= 0;
+      is_load_r <= 0;
+      is_store_r <= 0;
+      is_branch_r <= 0;
+      is_jump_r <= 0;
+      is_call_r <= 0;
+      is_return_r <= 0;
       is_halt_r <= 0;
-      is_mov_reg_r <= 0; is_mov_imm_r <= 0;
-      is_brgt_r <= 0; is_brr_reg_r <= 0; is_brr_imm_r <= 0;
-    end
-    else if (state == S1) begin
+      is_mov_reg_r <= 0;
+      is_mov_imm_r <= 0;
+      is_brgt_r <= 0;
+      is_brr_reg_r <= 0;
+      is_brr_imm_r <= 0;
+    end else if (state == S1) begin
       write_r <= write;
       is_load_r <= is_load;
       is_store_r <= is_store;
@@ -165,22 +166,21 @@ module tinker_core (
   wire [63:0] r31_val = reg_file.registers[31];
   wire [63:0] stack_top = r31_val - 64'd8;
 
-  wire [63:0] mem_addr =
-      (is_call_r || is_return_r) ? stack_top : c_reg;
+  wire [63:0] mem_data_addr = (is_call_r || is_return_r) ? stack_top : c_reg;
 
-  wire [63:0] mem_wdata =
-      is_call_r ? (pc_reg + 64'd4) : b_reg;
+  wire [63:0] mem_wdata = is_call_r ? (pc_reg + 64'd4) : b_reg;
 
-  wire mem_we = (state == S3) && is_store_r;
-  wire mem_call_we = (state == S3) && is_call_r;
+  wire mem_we = (state == S3) && (is_store_r || is_call_r);
 
-  mem_module #(.MEM_SIZE(`MEM_SIZE)) memory (
+  mem_module #(
+      .MEM_SIZE(`MEM_SIZE)
+  ) memory (
       .clk(clk),
       .fetch_addr(pc),
       .instr_out(instr),
-      .data_addr(mem_addr),
+      .data_addr(mem_data_addr),
       .write_data(mem_wdata),
-      .we(mem_we || mem_call_we),
+      .we(mem_we),
       .read_data(mem_rdata)
   );
 
@@ -195,42 +195,19 @@ module tinker_core (
       is_mov_imm_r ? ((a_reg & ~64'hFFF) | imm_reg) :
       c_reg;
 
-  wire reg_we = (state == S4) && write_r &&
-                !is_call_r && !is_return_r;
+  wire reg_we = (state == S4) && write_r && !is_call_r && !is_return_r;
 
   // ================= PC CONTROL =================
-  reg advance, branch;
-  reg [63:0] next_pc;
+  reg advance;
 
   always @(*) begin
     advance = 0;
-    branch = 0;
-    next_pc = 0;
 
-    if (state == S2) begin
-      if (is_call_r) begin
-        branch = 1;
-        next_pc = a_reg;
-      end
-      else if (is_branch_r) begin
-        branch = 1;
-        next_pc = c_reg;
-      end
-    end
-
-    if (state == S4 && is_return_r) begin
-      branch = 1;
-      next_pc = mem_out_reg;
-    end
-
-    // advance only when instruction finishes
-    if (state == S4)
-      advance = 1;
-    else if (state == S3 && !(is_load_r || is_return_r))
-      advance = 1;
+    if (state == S4) advance = 1;
+    else if (state == S3 && !(is_load_r || is_return_r)) advance = 1;
     else if (state == S2 &&
-            !(is_load_r || is_store_r || is_call_r || is_return_r) &&
-            !(write_r && !is_branch_r))
+          !(is_load_r || is_store_r || is_call_r || is_return_r) &&
+          !(write_r && !is_branch_r))
       advance = 1;
   end
 
@@ -240,18 +217,27 @@ module tinker_core (
       .reset(reset),
       .halt(hlt),
       .advance(advance),
-      .is_jump(branch),
-      .is_branch(0),
+
+      // correct control
+      .is_jump  (is_jump_r && !is_return_r && (state == S2)),
+      .is_branch(is_branch_r && (state == S2)),
+
       .is_brgt(is_brgt_r),
       .is_brr_reg(is_brr_reg_r),
       .is_brr_imm(is_brr_imm_r),
-      .is_return(0),
-      .is_call(0),
+
+      // critical
+      .is_return(is_return_r && (state == S4)),
+      .is_call  (is_call_r && (state == S2)),
+
       .branch_cond(alu_result[0]),
+
       .data1(a_reg),
       .data2(b_reg),
       .immediate(imm_reg),
-      .mem_rdata(next_pc),
+
+      .mem_rdata(mem_out_reg),
+
       .pc(pc)
   );
 
