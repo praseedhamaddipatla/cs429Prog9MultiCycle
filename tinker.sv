@@ -65,6 +65,11 @@ module tinker_core (
   reg is_mov_reg_r, is_mov_imm_r;
   reg is_brgt_r, is_brr_reg_r, is_brr_imm_r;
 
+  // ================= LATCHED MEM ADDR/DATA =================
+  // Latched at end of S2 so mem_module sees fully stable inputs during S3.
+  reg [63:0] mem_addr_r;
+  reg [63:0] mem_wdata_r;
+
   // ================= STATE =================
   always @(posedge clk) begin
     if (reset) state <= S0;
@@ -99,7 +104,7 @@ module tinker_core (
   // ================= FETCH =================
   always @(posedge clk) begin
     if (state == S0) begin
-      IR <= instr;
+      IR     <= instr;
       pc_reg <= pc;
     end
   end
@@ -109,34 +114,31 @@ module tinker_core (
   // ================= CONTROL LATCH =================
   always @(posedge clk) begin
     if (reset) begin
-      write_r <= 0; use_imm_r <= 0;
-      is_load_r <= 0; is_store_r <= 0;
-      is_branch_r <= 0; is_jump_r <= 0;
-      is_call_r <= 0; is_return_r <= 0;
-      is_halt_r <= 0;
+      write_r      <= 0; use_imm_r   <= 0;
+      is_load_r    <= 0; is_store_r  <= 0;
+      is_branch_r  <= 0; is_jump_r   <= 0;
+      is_call_r    <= 0; is_return_r <= 0;
+      is_halt_r    <= 0;
       is_mov_reg_r <= 0; is_mov_imm_r <= 0;
-      is_brgt_r <= 0; is_brr_reg_r <= 0; is_brr_imm_r <= 0;
+      is_brgt_r    <= 0; is_brr_reg_r <= 0; is_brr_imm_r <= 0;
     end else if (state == S1) begin
-      write_r <= write;
-      use_imm_r <= use_imm;
-
-      is_load_r <= is_load;
-      is_store_r <= is_store;
-      is_branch_r <= is_branch;
-      is_jump_r <= is_jump;
-      is_call_r <= is_call;
-      is_return_r <= is_return;
-      is_halt_r <= is_halt;
-
+      write_r      <= write;
+      use_imm_r    <= use_imm;
+      is_load_r    <= is_load;
+      is_store_r   <= is_store;
+      is_branch_r  <= is_branch;
+      is_jump_r    <= is_jump;
+      is_call_r    <= is_call;
+      is_return_r  <= is_return;
+      is_halt_r    <= is_halt;
       is_mov_reg_r <= is_mov_reg;
       is_mov_imm_r <= is_mov_imm;
-
-      is_brgt_r <= is_brgt;
+      is_brgt_r    <= is_brgt;
       is_brr_reg_r <= is_brr_reg;
       is_brr_imm_r <= is_brr_imm;
 
-      a_reg <= data1;
-      b_reg <= data2;
+      a_reg   <= data1;
+      b_reg   <= data2;
       imm_reg <= immediate;
     end
   end
@@ -164,25 +166,35 @@ module tinker_core (
     if (state == S2) c_reg <= alu_result;
   end
 
-  // ================= MEMORY =================
-  wire [63:0] r31_val = reg_file.registers[31];
+  // ================= MEMORY ADDRESS / DATA LATCH =================
+  // r31 is stable throughout; compute stack_top combinationally.
+  wire [63:0] r31_val   = reg_file.registers[31];
   wire [63:0] stack_top = r31_val - 64'd8;
 
-  wire [63:0] mem_data_addr =
-      (is_call_r || is_return_r) ? stack_top :
-      (a_reg + imm_reg);
+  // Next-cycle address and write-data (evaluated while in S2)
+  wire [63:0] mem_data_addr_next =
+      (is_call_r || is_return_r) ? stack_top : (a_reg + imm_reg);
 
-  wire [63:0] mem_wdata =
+  wire [63:0] mem_wdata_next =
       is_call_r ? (pc_reg + 64'd4) : b_reg;
 
+  // Latch on the posedge that transitions S2→S3
+  always @(posedge clk) begin
+    if (state == S2) begin
+      mem_addr_r  <= mem_data_addr_next;
+      mem_wdata_r <= mem_wdata_next;
+    end
+  end
+
+  // ================= MEMORY =================
   wire mem_we = (state == S3) && (is_store_r || is_call_r);
 
   mem_module #(.MEM_SIZE(`MEM_SIZE)) memory (
       .clk(clk),
       .fetch_addr(pc),
       .instr_out(instr),
-      .data_addr(mem_data_addr),
-      .write_data(mem_wdata),
+      .data_addr(mem_addr_r),    // stable registered address
+      .write_data(mem_wdata_r),  // stable registered write data
       .we(mem_we),
       .read_data(mem_rdata)
   );
@@ -193,7 +205,7 @@ module tinker_core (
 
   // ================= WRITEBACK =================
   wire [63:0] wb_data =
-      is_load_r ? mem_out_reg :
+      is_load_r    ? mem_out_reg :
       is_mov_reg_r ? a_reg :
       is_mov_imm_r ? ((a_reg & ~64'hFFF) | imm_reg) :
       c_reg;
@@ -203,10 +215,8 @@ module tinker_core (
       !is_call_r && !is_return_r;
 
   // ================= FETCH CONTROL =================
-  // FIX: added !is_call_r to the S3 advance condition.
-  // call redirects the PC in S2 via is_call; if advance also fires in S3
-  // the fetch unit double-advances past the redirect target, causing the
-  // simulation to spin and the stack write to be lost.
+  // !is_call_r: call already redirected PC in S2 via is_call port;
+  // allowing advance in S3 would double-advance past the branch target.
   wire advance =
       (state == S4) ||
       (state == S3 && !is_load_r && !is_return_r && !is_call_r) ||
