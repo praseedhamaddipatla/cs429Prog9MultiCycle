@@ -13,7 +13,6 @@ module tinker_core (
     output reg hlt
 );
 
-  // ================= STATES =================
   parameter S0 = 3'd0;
   parameter S1 = 3'd1;
   parameter S2 = 3'd2;
@@ -22,11 +21,9 @@ module tinker_core (
 
   reg [2:0] state, next_state;
 
-  // ================= FETCH =================
   wire [63:0] pc;
   wire [31:0] instr;
 
-  // ================= DECODE =================
   wire [4:0] raddr1, raddr2, waddr;
   wire [63:0] immediate;
   wire [4:0] op;
@@ -39,24 +36,19 @@ module tinker_core (
   wire is_mov_reg, is_mov_imm;
   wire [4:0] rt_addr;
 
-  // ================= REGFILE =================
   wire [63:0] data1, data2, data3;
 
-  // ================= ALU =================
   reg [63:0] alu_a, alu_b;
   wire [63:0] alu_result;
 
-  // ================= MEMORY =================
   wire [63:0] mem_rdata;
   reg  [63:0] mem_out_reg;
 
-  // ================= PIPELINE REGS =================
   reg [31:0] IR;
   reg [63:0] pc_reg;
   reg [63:0] a_reg, b_reg, c_reg;
   reg [63:0] imm_reg;
 
-  // control latches
   reg write_r, use_imm_r;
   reg is_load_r, is_store_r;
   reg is_branch_r, is_jump_r;
@@ -75,7 +67,6 @@ module tinker_core (
     case (state)
       S0: next_state = S1;
       S1: next_state = S2;
-
       S2: begin
         if (is_load_r || is_store_r || is_call_r || is_return_r)
           next_state = S3;
@@ -84,14 +75,12 @@ module tinker_core (
         else
           next_state = S0;
       end
-
       S3: begin
         if (is_load_r || is_return_r)
           next_state = S4;
         else
           next_state = S0;
       end
-
       default: next_state = S0;
     endcase
   end
@@ -109,13 +98,13 @@ module tinker_core (
   // ================= CONTROL LATCH =================
   always @(posedge clk) begin
     if (reset) begin
-      write_r      <= 0; use_imm_r    <= 0;
-      is_load_r    <= 0; is_store_r   <= 0;
-      is_branch_r  <= 0; is_jump_r    <= 0;
-      is_call_r    <= 0; is_return_r  <= 0;
-      is_halt_r    <= 0;
+      write_r <= 0; use_imm_r <= 0;
+      is_load_r <= 0; is_store_r <= 0;
+      is_branch_r <= 0; is_jump_r <= 0;
+      is_call_r <= 0; is_return_r <= 0;
+      is_halt_r <= 0;
       is_mov_reg_r <= 0; is_mov_imm_r <= 0;
-      is_brgt_r    <= 0; is_brr_reg_r <= 0; is_brr_imm_r <= 0;
+      is_brgt_r <= 0; is_brr_reg_r <= 0; is_brr_imm_r <= 0;
     end else if (state == S1) begin
       write_r      <= write;
       use_imm_r    <= use_imm;
@@ -131,7 +120,6 @@ module tinker_core (
       is_brgt_r    <= is_brgt;
       is_brr_reg_r <= is_brr_reg;
       is_brr_imm_r <= is_brr_imm;
-
       a_reg   <= data1;
       b_reg   <= data2;
       imm_reg <= immediate;
@@ -162,20 +150,15 @@ module tinker_core (
   end
 
   // ================= MEMORY =================
-  // Match reference exactly: combinational address/data, gated write-enable.
   wire [63:0] r31_val   = reg_file.registers[31];
   wire [63:0] stack_top = r31_val - 64'd8;
 
-  // data_addr: combinational, stable throughout S3
   wire [63:0] mem_data_addr =
       (is_call_r || is_return_r) ? stack_top : (a_reg + imm_reg);
 
-  // write data: for call, save the return address (pc of call instr + 4)
-  // pc_reg is the pipeline-latched PC of the current instruction (stable)
   wire [63:0] mem_wdata =
       is_call_r ? (pc_reg + 64'd4) : b_reg;
 
-  // write enable: only in S3, only for store or call
   wire mem_we = (state == S3) && (is_store_r || is_call_r);
 
   mem_module #(.MEM_SIZE(`MEM_SIZE)) memory (
@@ -204,9 +187,10 @@ module tinker_core (
       !is_call_r && !is_return_r;
 
   // ================= FETCH CONTROL =================
-  // advance must NOT fire in S3 for call: the PC was already redirected in
-  // S2 via is_call; a second advance would corrupt it.
-  // advance must NOT fire in S3 for return: PC redirect happens in S4.
+  // call:   PC redirect happens via is_jump (taken) in S2.
+  //         advance must be blocked in S3 to avoid double-advance.
+  // return: PC redirect happens via is_return in S4 (from mem_out_reg).
+  //         advance must be blocked in S3.
   wire advance =
       (state == S4) ||
       (state == S3 && !is_load_r && !is_return_r && !is_call_r) ||
@@ -214,18 +198,17 @@ module tinker_core (
        !is_load_r && !is_store_r && !is_call_r && !is_return_r &&
        !(write_r && !is_branch_r));
 
-  // is_jump_r is set for both br/call AND return by the decoder.
-  // Gate out return here (return redirects via is_return at S4, not is_jump at S2).
-  // Gate out call separately via is_call so fetch uses is_call path.
   fetch fetch_inst (
       .clk(clk),
       .reset(reset),
       .halt(hlt),
       .advance(advance),
 
-      .is_jump  (is_jump_r && !is_return_r && !is_call_r && (state == S2)),
-      .is_branch(is_branch_r && (state == S2)),
-      .is_brgt  (is_brgt_r),
+      // is_jump fires for call in S2 (decoder sets is_jump=1 for call).
+      // Block it for return (return uses is_return at S4 instead).
+      .is_jump   (is_jump_r && !is_return_r && (state == S2)),
+      .is_branch (is_branch_r && (state == S2)),
+      .is_brgt   (is_brgt_r),
       .is_brr_reg(is_brr_reg_r),
       .is_brr_imm(is_brr_imm_r),
 
@@ -242,27 +225,27 @@ module tinker_core (
 
   // ================= DECODER =================
   decoder dec_inst (
-      .instr   (dec_instr),
-      .raddr1  (raddr1),
-      .raddr2  (raddr2),
-      .waddr   (waddr),
-      .immediate(immediate),
-      .op      (op),
-      .use_imm (use_imm),
-      .write   (write),
-      .is_load (is_load),
-      .is_store(is_store),
-      .is_branch(is_branch),
-      .is_brgt (is_brgt),
-      .is_jump (is_jump),
+      .instr     (dec_instr),
+      .raddr1    (raddr1),
+      .raddr2    (raddr2),
+      .waddr     (waddr),
+      .immediate (immediate),
+      .op        (op),
+      .use_imm   (use_imm),
+      .write     (write),
+      .is_load   (is_load),
+      .is_store  (is_store),
+      .is_branch (is_branch),
+      .is_brgt   (is_brgt),
+      .is_jump   (is_jump),
       .is_brr_reg(is_brr_reg),
       .is_brr_imm(is_brr_imm),
-      .is_return(is_return),
-      .is_call (is_call),
-      .is_halt (is_halt),
+      .is_return (is_return),
+      .is_call   (is_call),
+      .is_halt   (is_halt),
       .is_mov_reg(is_mov_reg),
       .is_mov_imm(is_mov_imm),
-      .rt_addr (rt_addr)
+      .rt_addr   (rt_addr)
   );
 
   // ================= REGFILE =================
