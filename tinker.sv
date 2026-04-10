@@ -57,10 +57,10 @@ module tinker_core (
   reg is_mov_reg_r, is_mov_imm_r;
   reg is_brgt_r, is_brr_reg_r, is_brr_imm_r;
 
-  // latch waddr so writeback knows where to write r31 for call
-  reg [4:0] waddr_r;
+  // r31 latched at S1 so stack_top is stable through S3 memory write
+  reg [63:0] r31_latched;
 
-  //  STATE 
+  //  STATE
   always @(posedge clk) begin
     if (reset) state <= S0;
     else if (!hlt) state <= next_state;
@@ -79,16 +79,16 @@ module tinker_core (
           next_state = S0;
       end
       S3: begin
-        if (is_load_r || is_return_r || is_call_r)
+        if (is_load_r || is_return_r)
           next_state = S4;
         else
-          next_state = S0;
+          next_state = S0;  // store and call both exit to S0
       end
       default: next_state = S0;
     endcase
   end
 
-  //  IR LATCH 
+  //  IR LATCH
   always @(posedge clk) begin
     if (state == S0) begin
       IR     <= instr;
@@ -98,7 +98,7 @@ module tinker_core (
 
   wire [31:0] dec_instr = IR;
 
-  //  CONTROL LATCH 
+  //  CONTROL LATCH
   always @(posedge clk) begin
     if (reset) begin
       write_r <= 0; use_imm_r <= 0;
@@ -108,7 +108,7 @@ module tinker_core (
       is_halt_r <= 0;
       is_mov_reg_r <= 0; is_mov_imm_r <= 0;
       is_brgt_r <= 0; is_brr_reg_r <= 0; is_brr_imm_r <= 0;
-      waddr_r <= 5'd0;
+      r31_latched <= 64'd524288;
     end else if (state == S1) begin
       write_r      <= write;
       use_imm_r    <= use_imm;
@@ -124,20 +124,21 @@ module tinker_core (
       is_brgt_r    <= is_brgt;
       is_brr_reg_r <= is_brr_reg;
       is_brr_imm_r <= is_brr_imm;
-      waddr_r      <= waddr;
-      a_reg   <= data1;
-      b_reg   <= data2;
-      imm_reg <= immediate;
+      a_reg        <= data1;
+      b_reg        <= data2;
+      imm_reg      <= immediate;
+      // snapshot r31 so stack_top cannot glitch due to live regfile reads
+      r31_latched  <= reg_file.registers[31];
     end
   end
 
-  //  HALT 
+  //  HALT
   always @(posedge clk) begin
     if (reset) hlt <= 0;
     else if (state == S1 && is_halt) hlt <= 1;
   end
 
-  //  ALU 
+  //  ALU
   always @(*) begin
     alu_a = a_reg;
     alu_b = use_imm_r ? imm_reg : b_reg;
@@ -154,9 +155,9 @@ module tinker_core (
     if (state == S2) c_reg <= alu_result;
   end
 
-  //  MEMORY 
-  wire [63:0] r31_val   = reg_file.registers[31];
-  wire [63:0] stack_top = r31_val - 64'd8;
+  //  MEMORY
+  // Use latched r31 so stack_top is stable at S3 regardless of any other activity
+  wire [63:0] stack_top = r31_latched - 64'd8;
 
   wire [63:0] mem_data_addr =
       (is_call_r || is_return_r) ? stack_top : (a_reg + imm_reg);
@@ -181,21 +182,17 @@ module tinker_core (
   end
 
   //  WRITEBACK
-  // For call: write stack_top (r31 - 8) back into r31 to decrement stack pointer.
-  // waddr_r was latched as 5'd31 by the decoder for call instructions.
   wire [63:0] wb_data =
-      is_call_r    ? stack_top   :
       is_load_r    ? mem_out_reg :
       is_mov_reg_r ? a_reg :
       is_mov_imm_r ? ((a_reg & ~64'hFFF) | imm_reg) :
       c_reg;
 
-  // call now participates in writeback (to update r31); only return is excluded.
   wire reg_we =
       (state == S4) && write_r &&
-      !is_return_r;
+      !is_call_r && !is_return_r;
 
-  //  FETCH CONTROL 
+  //  FETCH CONTROL
   wire advance =
       (state == S4) ||
       (state == S3 && !is_load_r && !is_return_r && !is_call_r) ||
@@ -226,7 +223,7 @@ module tinker_core (
       .pc(pc)
   );
 
-  //  DECODER 
+  //  DECODER
   decoder dec_inst (
       .instr     (dec_instr),
       .raddr1    (raddr1),
@@ -251,14 +248,14 @@ module tinker_core (
       .rt_addr   (rt_addr)
   );
 
-  //  REGFILE 
+  //  REGFILE
   reg_file reg_file (
       .clk   (clk),
       .reset (reset),
       .raddr1(raddr1),
       .raddr2(raddr2),
       .raddr3(rt_addr),
-      .waddr (waddr_r),
+      .waddr (waddr),
       .data  (wb_data),
       .write (reg_we),
       .r1    (data1),
