@@ -75,22 +75,33 @@ module tinker_core (
 
   // latch ctrl at S1
   always @(posedge clk) begin
-    if (state == S1) begin
-      is_load_r    <= is_load;
-      is_store_r   <= is_store;
-      is_call_r    <= is_call;
-      is_branch_r  <= is_branch;
-      is_jump_r    <= is_jump;
-      is_halt_r    <= is_halt;
-      write_r      <= write;
-      is_return_r  <= is_return;
-      is_mov_reg_r <= is_mov_reg;
-      is_mov_imm_r <= is_mov_imm;
-      is_brgt_r    <= is_brgt;
-      is_brr_reg_r <= is_brr_reg;
-      is_brr_imm_r <= is_brr_imm;
-    end
+  if (reset) begin
+    is_call_r   <= 0;
+    is_return_r <= 0;
+    is_store_r  <= 0;
+    is_load_r   <= 0;
+    write_r     <= 0;
+    is_branch_r <= 0;
+    is_jump_r   <= 0;
+    is_halt_r   <= 0;
   end
+  else if (state == S1) begin
+    // latch new instruction
+    is_load_r    <= is_load;
+    is_store_r   <= is_store;
+    is_call_r    <= is_call;
+    is_branch_r  <= is_branch;
+    is_jump_r    <= is_jump;
+    is_halt_r    <= is_halt;
+    write_r      <= write;
+    is_return_r  <= is_return;
+    is_mov_reg_r <= is_mov_reg;
+    is_mov_imm_r <= is_mov_imm;
+    is_brgt_r    <= is_brgt;
+    is_brr_reg_r <= is_brr_reg;
+    is_brr_imm_r <= is_brr_imm;
+  end
+end
 
   // halt
   always @(posedge clk) begin
@@ -126,7 +137,8 @@ module tinker_core (
   wire [63:0] mem_write_val = is_call_r ? (pc_latch + 64'd4) : data2;
 
   // write fires at S3 for call and store only
-  wire        mem_we = (is_store_r || is_call_r) && (state == S3) && !hlt;
+ wire mem_we = (state == S3) && !hlt &&
+              (is_store_r || is_call_r);
 
   mem_module #(
       .MEM_SIZE(`MEM_SIZE)
@@ -156,7 +168,8 @@ module tinker_core (
   wire final_reg_write = write_r && !is_call_r && !is_return_r && (state == S4) && !hlt;
 
   // advance: only when not branching/jumping/call/return
-  wire advance = (state == S2) && !hlt && !is_branch_r && !is_jump_r && !is_call_r && !is_return_r;
+  wire advance = (state == S2) && !hlt &&
+               !is_branch_r && !is_jump_r && !is_call_r;
 
 
   fetch fetch_inst (
@@ -177,7 +190,7 @@ module tinker_core (
       .data1      (data1),
       .data2      (data2),
       .immediate  (immediate),
-      .mem_rdata  (mem_out_reg),                                 // stable at S4
+      .mem_rdata  (mem_out_reg), 
       .pc         (pc)
   );
 
