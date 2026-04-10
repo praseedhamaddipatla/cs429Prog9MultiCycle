@@ -168,8 +168,12 @@ end
   wire final_reg_write = write_r && !is_call_r && !is_return_r && (state == S4) && !hlt;
 
   // advance: only when not branching/jumping/call/return
-  wire advance = (state == S2) && !hlt &&
-               !is_branch_r && !is_jump_r && !is_call_r;
+  wire advance =
+    !hlt && (
+        (state == S4) ||
+        (state == S3 && !needS4) ||
+        (state == S2 && !needS3 && !needS4)
+    );
 
 
   fetch fetch_inst (
