@@ -10,56 +10,26 @@
 module tinker_core (
     input clk,
     input reset,
-    output logic hlt
+    output reg hlt
 );
 
-  parameter S0 = 3'd0;
-  parameter S1 = 3'd1;
-  parameter S2 = 3'd2;
-  parameter S3 = 3'd3;
-  parameter S4 = 3'd4;
+  // ================= STATES =================
+  parameter S0 = 3'd0; // FETCH
+  parameter S1 = 3'd1; // DECODE
+  parameter S2 = 3'd2; // EXEC
+  parameter S3 = 3'd3; // MEM
+  parameter S4 = 3'd4; // WB
 
-  reg [2:0] state;
+  reg [2:0] state, next_state;
 
-  // ctrl signal latches
-  reg is_load_r, is_store_r, is_call_r;
-  reg is_branch_r, is_jump_r, is_halt_r;
-  reg write_r, is_return_r;
-  reg is_mov_reg_r, is_mov_imm_r;
-  reg is_brgt_r, is_brr_reg_r, is_brr_imm_r;
-
-
-  wire needS3 = is_load_r || is_store_r || is_call_r || is_return_r;
-  wire needS4 =
-    (write_r && !is_store_r && !is_branch_r && !is_halt_r)
-    || is_return_r;  // return: PC redirect fires at S4
-
-  always @(posedge clk) begin
-    if (reset) state <= S0;
-    else if (!hlt) begin
-      case (state)
-        S0: state <= S1;
-        S1: state <= S2;
-        S2: state <= needS3 ? S3 : needS4 ? S4 : S0;
-        S3: state <= needS4 ? S4 : S0;
-        S4: state <= S0;
-      endcase
-    end
-  end
-
-  // IR latch
-  reg [31:0] IR;
-  always @(posedge clk) begin
-    if (state == S0) IR <= instr;
-  end
-  wire [31:0] dec_instr = (state == S0) ? instr : IR;
-
-  // wires
+  // ================= FETCH =================
   wire [63:0] pc;
   wire [31:0] instr;
+
+  // ================= DECODE =================
   wire [4:0] raddr1, raddr2, waddr;
   wire [63:0] immediate;
-  wire [ 4:0] op;
+  wire [4:0] op;
   wire use_imm, write;
   wire is_load, is_store;
   wire is_branch, is_brgt, is_jump;
@@ -69,59 +39,116 @@ module tinker_core (
   wire is_mov_reg, is_mov_imm;
   wire [4:0] rt_addr;
 
+  // ================= REGFILE =================
   wire [63:0] data1, data2, data3;
+
+  // ================= ALU =================
+  reg [63:0] alu_a, alu_b;
   wire [63:0] alu_result;
+
+  // ================= MEMORY =================
   wire [63:0] mem_rdata;
+  reg [63:0] mem_out_reg;
 
-  // latch ctrl at S1
+  // ================= PIPELINE REGS =================
+  reg [31:0] IR;
+  reg [63:0] pc_reg;
+  reg [63:0] a_reg, b_reg, c_reg;
+  reg [63:0] imm_reg;
+
+  // control latches
+  reg write_r, is_load_r, is_store_r;
+  reg is_branch_r, is_jump_r;
+  reg is_call_r, is_return_r;
+  reg is_halt_r;
+  reg is_mov_reg_r, is_mov_imm_r;
+  reg is_brgt_r, is_brr_reg_r, is_brr_imm_r;
+
+  // ================= STATE UPDATE =================
   always @(posedge clk) begin
-  if (reset) begin
-    is_call_r   <= 0;
-    is_return_r <= 0;
-    is_store_r  <= 0;
-    is_load_r   <= 0;
-    write_r     <= 0;
-    is_branch_r <= 0;
-    is_jump_r   <= 0;
-    is_halt_r   <= 0;
+    if (reset) state <= S0;
+    else if (!hlt) state <= next_state;
   end
-  else if (state == S1) begin
-    // latch new instruction
-    is_load_r    <= is_load;
-    is_store_r   <= is_store;
-    is_call_r    <= is_call;
-    is_branch_r  <= is_branch;
-    is_jump_r    <= is_jump;
-    is_halt_r    <= is_halt;
-    write_r      <= write;
-    is_return_r  <= is_return;
-    is_mov_reg_r <= is_mov_reg;
-    is_mov_imm_r <= is_mov_imm;
-    is_brgt_r    <= is_brgt;
-    is_brr_reg_r <= is_brr_reg;
-    is_brr_imm_r <= is_brr_imm;
-  end
-end
 
-  // halt
+  always @(*) begin
+    next_state = state;
+
+    case (state)
+      S0: next_state = S1;
+      S1: next_state = S2;
+
+      S2: begin
+        if (is_load_r || is_store_r || is_call_r || is_return_r)
+          next_state = S3;
+        else if (write_r && !is_branch_r)
+          next_state = S4;
+        else
+          next_state = S0;
+      end
+
+      S3: begin
+        if (is_load_r || is_return_r)
+          next_state = S4;
+        else
+          next_state = S0;
+      end
+
+      S4: next_state = S0;
+    endcase
+  end
+
+  // ================= FETCH/IR =================
+  always @(posedge clk) begin
+    if (state == S0) begin
+      IR <= instr;
+      pc_reg <= pc;
+    end
+  end
+
+  wire [31:0] dec_instr = IR;
+
+  // ================= CONTROL LATCH =================
+  always @(posedge clk) begin
+    if (reset) begin
+      write_r <= 0; is_load_r <= 0; is_store_r <= 0;
+      is_branch_r <= 0; is_jump_r <= 0;
+      is_call_r <= 0; is_return_r <= 0;
+      is_halt_r <= 0;
+      is_mov_reg_r <= 0; is_mov_imm_r <= 0;
+      is_brgt_r <= 0; is_brr_reg_r <= 0; is_brr_imm_r <= 0;
+    end
+    else if (state == S1) begin
+      write_r <= write;
+      is_load_r <= is_load;
+      is_store_r <= is_store;
+      is_branch_r <= is_branch;
+      is_jump_r <= is_jump;
+      is_call_r <= is_call;
+      is_return_r <= is_return;
+      is_halt_r <= is_halt;
+      is_mov_reg_r <= is_mov_reg;
+      is_mov_imm_r <= is_mov_imm;
+      is_brgt_r <= is_brgt;
+      is_brr_reg_r <= is_brr_reg;
+      is_brr_imm_r <= is_brr_imm;
+
+      a_reg <= data1;
+      b_reg <= data2;
+      imm_reg <= immediate;
+    end
+  end
+
+  // ================= HALT =================
   always @(posedge clk) begin
     if (reset) hlt <= 0;
-    else if (is_halt_r && state == S2) hlt <= 1;
+    else if (state == S1 && is_halt) hlt <= 1;
   end
 
-  // SP — never modified by call/return per ISA
-  wire [63:0] r31_val = reg_file.registers[31];
-  wire [63:0] stack_top = r31_val - 64'd8;
-
-  // PC latch: capture at S1 so call has the right return address
-  reg  [63:0] pc_latch;
-  always @(posedge clk) begin
-    if (state == S1) pc_latch <= pc;
+  // ================= ALU =================
+  always @(*) begin
+    alu_a = a_reg;
+    alu_b = use_imm ? imm_reg : b_reg;
   end
-
-  // ALU
-  wire [63:0] alu_a = is_brgt_r ? data2 : data1;
-  wire [63:0] alu_b = is_brgt_r ? data3 : (use_imm ? immediate : data2);
 
   alu alu_inst (
       .a(alu_a),
@@ -130,110 +157,142 @@ end
       .result(alu_result)
   );
 
-  // Memory address/data — combinatorial, stable because r31 never changes
-  // for call/return
-  wire [63:0] mem_data_addr = (is_call_r || is_return_r) ? stack_top : (data1 + immediate);
+  always @(posedge clk) begin
+    if (state == S2) c_reg <= alu_result;
+  end
 
-  wire [63:0] mem_write_val = is_call_r ? (pc_latch + 64'd4) : data2;
+  // ================= MEMORY =================
+  wire [63:0] r31_val = reg_file.registers[31];
+  wire [63:0] stack_top = r31_val - 64'd8;
 
-  // write fires at S3 for call and store only
- wire mem_we = (state == S3) && !hlt &&
-              (is_store_r || is_call_r);
+  wire [63:0] mem_addr =
+      (is_call_r || is_return_r) ? stack_top : c_reg;
 
-  mem_module #(
-      .MEM_SIZE(`MEM_SIZE)
-  ) memory (
-      .clk       (clk),
+  wire [63:0] mem_wdata =
+      is_call_r ? (pc_reg + 64'd4) : b_reg;
+
+  wire mem_we = (state == S3) && is_store_r;
+  wire mem_call_we = (state == S3) && is_call_r;
+
+  mem_module #(.MEM_SIZE(`MEM_SIZE)) memory (
+      .clk(clk),
       .fetch_addr(pc),
-      .instr_out (instr),
-      .data_addr (mem_data_addr),
-      .write_data(mem_write_val),
-      .we        (mem_we),
-      .read_data (mem_rdata)
+      .instr_out(instr),
+      .data_addr(mem_addr),
+      .write_data(mem_wdata),
+      .we(mem_we || mem_call_we),
+      .read_data(mem_rdata)
   );
 
-  // Latch mem_rdata at end of S3 — return uses this at S4
-  reg [63:0] mem_out_reg;
   always @(posedge clk) begin
     if (state == S3) mem_out_reg <= mem_rdata;
   end
 
-  // Writeback — call/return write NO register
+  // ================= WRITEBACK =================
   wire [63:0] wb_data =
-      is_load_r    ? mem_out_reg                       :
-      is_mov_reg_r ? data1                             :
-      is_mov_imm_r ? ((data1 & ~64'hFFF) | immediate)  :
-                     alu_result;
+      is_load_r ? mem_out_reg :
+      is_mov_reg_r ? a_reg :
+      is_mov_imm_r ? ((a_reg & ~64'hFFF) | imm_reg) :
+      c_reg;
 
-  wire final_reg_write = write_r && !is_call_r && !is_return_r && (state == S4) && !hlt;
+  wire reg_we = (state == S4) && write_r &&
+                !is_call_r && !is_return_r;
 
-  // advance: only when not branching/jumping/call/return
-  wire advance =
-    !hlt && (
-        (state == S4) ||
-        (state == S3 && !needS4) ||
-        (state == S2 && !needS3 && !needS4)
-    );
+  // ================= PC CONTROL =================
+  reg advance, branch;
+  reg [63:0] next_pc;
 
+  always @(*) begin
+    advance = 0;
+    branch = 0;
+    next_pc = 0;
 
+    if (state == S2) begin
+      if (is_call_r) begin
+        branch = 1;
+        next_pc = a_reg;
+      end
+      else if (is_branch_r) begin
+        branch = 1;
+        next_pc = c_reg;
+      end
+    end
+
+    if (state == S4 && is_return_r) begin
+      branch = 1;
+      next_pc = mem_out_reg;
+    end
+
+    // advance only when instruction finishes
+    if (state == S4)
+      advance = 1;
+    else if (state == S3 && !(is_load_r || is_return_r))
+      advance = 1;
+    else if (state == S2 &&
+            !(is_load_r || is_store_r || is_call_r || is_return_r) &&
+            !(write_r && !is_branch_r))
+      advance = 1;
+  end
+
+  // ================= FETCH =================
   fetch fetch_inst (
-      .clk        (clk),
-      .reset      (reset),
-      .halt       (hlt),
-      .advance    (advance),
-      // is_jump excludes is_return_r so fetch doesn't redirect at S2 for return
-      .is_jump    (is_jump_r && !is_return_r && (state == S2)),
-      .is_branch  (is_branch_r && (state == S2)),
-      .is_brgt    (is_brgt_r),
-      .is_brr_reg (is_brr_reg_r),
-      .is_brr_imm (is_brr_imm_r),
-      // return fires at S4 with the latched return address
-      .is_return  (is_return_r && (state == S4)),
-      .is_call    (is_call_r && (state == S2)),
+      .clk(clk),
+      .reset(reset),
+      .halt(hlt),
+      .advance(advance),
+      .is_jump(branch),
+      .is_branch(0),
+      .is_brgt(is_brgt_r),
+      .is_brr_reg(is_brr_reg_r),
+      .is_brr_imm(is_brr_imm_r),
+      .is_return(0),
+      .is_call(0),
       .branch_cond(alu_result[0]),
-      .data1      (data1),
-      .data2      (data2),
-      .immediate  (immediate),
-      .mem_rdata  (mem_out_reg), 
-      .pc         (pc)
+      .data1(a_reg),
+      .data2(b_reg),
+      .immediate(imm_reg),
+      .mem_rdata(next_pc),
+      .pc(pc)
   );
 
+  // ================= DECODER =================
   decoder dec_inst (
-      .instr     (dec_instr),
-      .raddr1    (raddr1),
-      .raddr2    (raddr2),
-      .waddr     (waddr),
-      .immediate (immediate),
-      .op        (op),
-      .use_imm   (use_imm),
-      .write     (write),
-      .is_load   (is_load),
-      .is_store  (is_store),
-      .is_branch (is_branch),
-      .is_brgt   (is_brgt),
-      .is_jump   (is_jump),
+      .instr(dec_instr),
+      .raddr1(raddr1),
+      .raddr2(raddr2),
+      .waddr(waddr),
+      .immediate(immediate),
+      .op(op),
+      .use_imm(use_imm),
+      .write(write),
+      .is_load(is_load),
+      .is_store(is_store),
+      .is_branch(is_branch),
+      .is_brgt(is_brgt),
+      .is_jump(is_jump),
       .is_brr_reg(is_brr_reg),
       .is_brr_imm(is_brr_imm),
-      .is_return (is_return),
-      .is_call   (is_call),
-      .is_halt   (is_halt),
+      .is_return(is_return),
+      .is_call(is_call),
+      .is_halt(is_halt),
       .is_mov_reg(is_mov_reg),
       .is_mov_imm(is_mov_imm),
-      .rt_addr   (rt_addr)
+      .rt_addr(rt_addr)
   );
 
+  // ================= REGFILE =================
   reg_file reg_file (
-      .clk   (clk),
-      .reset (reset),
+      .clk(clk),
+      .reset(reset),
       .raddr1(raddr1),
       .raddr2(raddr2),
       .raddr3(rt_addr),
-      .waddr (waddr),
-      .data  (wb_data),
-      .write (final_reg_write),
-      .r1    (data1),
-      .r2    (data2),
-      .r3    (data3)
+      .waddr(waddr),
+      .data(wb_data),
+      .write(reg_we),
+      .r1(data1),
+      .r2(data2),
+      .r3(data3)
   );
 
 endmodule
