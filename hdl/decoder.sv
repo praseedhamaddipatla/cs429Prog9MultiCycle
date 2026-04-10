@@ -147,15 +147,17 @@ module decoder (
         is_brr_imm = 1;
       end
       5'h0B: begin  // brnz rd, rs  — ALU checks rs != 0
-        raddr1 = rs;  // a = rs (value to test)
-        raddr2 = rd;  // b = rd (branch target, also needed in core)
+        raddr1 = rs;  // a = rs
+        raddr2 = rd;  // b = rd
         op = CMPNZ;
         is_branch = 1;
       end
       5'h0C: begin  // call rd
         raddr1  = rd;
+        waddr   = 5'd31;
         is_jump = 1;
         is_call = 1;
+        write   = 1;
       end
       5'h0D: begin  // return
         is_jump   = 1;
