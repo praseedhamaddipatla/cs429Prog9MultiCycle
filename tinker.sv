@@ -57,7 +57,7 @@ module tinker_core (
   reg is_mov_reg_r, is_mov_imm_r;
   reg is_brgt_r, is_brr_reg_r, is_brr_imm_r;
 
-  // r31 latched at S1 so stack_top is stable through S3 memory write
+  // r31 latched at S1
   reg [63:0] r31_latched;
 
   //  STATE
@@ -88,7 +88,7 @@ module tinker_core (
     endcase
   end
 
-  //  IR LATCH
+  //  IR latch
   always @(posedge clk) begin
     if (state == S0) begin
       IR     <= instr;
@@ -98,7 +98,7 @@ module tinker_core (
 
   wire [31:0] dec_instr = IR;
 
-  //  CONTROL LATCH
+  //  ctrl latch
   always @(posedge clk) begin
     if (reset) begin
       write_r <= 0; use_imm_r <= 0;
@@ -127,12 +127,11 @@ module tinker_core (
       a_reg        <= data1;
       b_reg        <= data2;
       imm_reg      <= immediate;
-      // snapshot r31 so stack_top cannot glitch due to live regfile reads
       r31_latched  <= reg_file.registers[31];
     end
   end
 
-  //  HALT
+  //  halt
   always @(posedge clk) begin
     if (reset) hlt <= 0;
     else if (state == S1 && is_halt) hlt <= 1;
@@ -155,8 +154,8 @@ module tinker_core (
     if (state == S2) c_reg <= alu_result;
   end
 
-  //  MEMORY
-  // Use latched r31 so stack_top is stable at S3 regardless of any other activity
+  //  memroy
+  // latched r31
   wire [63:0] stack_top = r31_latched - 64'd8;
 
   wire [63:0] mem_data_addr =
@@ -181,7 +180,7 @@ module tinker_core (
     if (state == S3) mem_out_reg <= mem_rdata;
   end
 
-  //  WRITEBACK
+  //  writeback
   wire [63:0] wb_data =
       is_load_r    ? mem_out_reg :
       is_mov_reg_r ? a_reg :
@@ -192,7 +191,7 @@ module tinker_core (
       (state == S4) && write_r &&
       !is_call_r && !is_return_r;
 
-  //  FETCH CONTROL
+  //  fetch
   wire advance =
       (state == S4) ||
       (state == S3 && !is_load_r && !is_return_r && !is_call_r) ||
@@ -223,7 +222,7 @@ module tinker_core (
       .pc(pc)
   );
 
-  //  DECODER
+  //  decoder
   decoder dec_inst (
       .instr     (dec_instr),
       .raddr1    (raddr1),
@@ -248,7 +247,7 @@ module tinker_core (
       .rt_addr   (rt_addr)
   );
 
-  //  REGFILE
+  //  regfile
   reg_file reg_file (
       .clk   (clk),
       .reset (reset),

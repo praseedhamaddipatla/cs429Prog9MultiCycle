@@ -5,16 +5,16 @@ module fetch (
     input halt,
     input advance,
 
-    // decoded instr type — all gated by state in tinker_core
+    // decoded instr type
     input is_jump,
     input is_branch,
     input is_brgt,
     input is_brr_reg,
     input is_brr_imm,
-    input is_return,   // fires only at S4 from tinker_core
+    input is_return,
     input is_call,
 
-    // branch condition from ALU (1 = taken)
+    // branch condition from ALU
     input branch_cond,
 
     // register values
@@ -22,7 +22,7 @@ module fetch (
     input [63:0] data2,
     input [63:0] immediate,
 
-    // return address from stack (mem_out_reg, stable at S4)
+    // return address from stack
     input [63:0] mem_rdata,
 
     output [63:0] pc
@@ -44,7 +44,7 @@ module fetch (
       pc_reg <= `PC_START;
     end else if (!halt) begin
       if (is_return) begin
-        // return redirect — fires at S4, mem_rdata is mem_out_reg (stable)
+        // return redirect
         if (mem_rdata >= `MEM_SIZE) pc_reg <= `PC_START;
         else pc_reg <= mem_rdata;
       end else if (taken) begin
