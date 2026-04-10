@@ -30,8 +30,9 @@ module tinker_core (
 
 
   wire needS3 = is_load_r || is_store_r || is_call_r || is_return_r;
-  wire needS4 = write_r && !is_store_r && !is_branch_r && !is_halt_r
-                || is_call_r    // call: need S4 after S3 mem-write
+  wire needS4 =
+    (write_r && !is_store_r && !is_branch_r && !is_halt_r)
+    || is_return_r;
   || is_return_r;  // return: PC redirect fires at S4
 
   always @(posedge clk) begin
