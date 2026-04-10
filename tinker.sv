@@ -100,6 +100,12 @@ module tinker_core (
   // stack ptr
   wire [63:0] r31_val = reg_file.registers[31];
 
+  // pc latch
+  reg [63:0] pc_latch;
+  always @(posedge clk) begin
+    if (state == S1) pc_latch <= pc;
+  end
+
   // alu
   wire [63:0] alu_a = is_brgt_r ? data2 : data1;
   wire [63:0] alu_b = is_brgt_r ? data3 : (use_imm ? immediate : data2);
@@ -111,12 +117,15 @@ module tinker_core (
       .result(alu_result)
   );
 
-  // mem
-  wire [63:0] mem_data_addr = is_call_r   ? (r31_val - 64'd8) : 
-                               is_return_r ? r31_val : 
-                               (data1 + immediate);
+  // mem address and write data
 
-  wire [63:0] mem_write_val = is_call_r ? (pc + 64'd4) : data2;
+  wire [63:0] mem_data_addr = is_call_r   ? (r31_val - 64'd8) :
+                               is_return_r ? r31_val            :
+                                             (data1 + immediate);
+
+  // Use pc_latch (the call instruction's own PC) so return address = call_pc + 4
+  wire [63:0] mem_write_val = is_call_r ? (pc_latch + 64'd4) : data2;
+
   wire mem_we = (is_store_r || is_call_r) && (state == S3) && !hlt;
 
   mem_module #(
@@ -132,34 +141,35 @@ module tinker_core (
   );
 
   // writeback
+
   wire [63:0] wb_data =
-      is_load_r     ? mem_rdata :
-      is_call_r     ? (r31_val - 64'd8) : 
-      is_return_r   ? (r31_val + 64'd8) : 
-      is_mov_reg_r  ? data1 :
-      is_mov_imm_r  ? ((data1 & ~64'hFFF) | immediate) :
-      alu_result;
+      is_load_r    ? mem_rdata           :
+      is_call_r    ? (r31_val - 64'd8)   :
+      is_return_r  ? (r31_val + 64'd8)   :
+      is_mov_reg_r ? data1               :
+      is_mov_imm_r ? ((data1 & ~64'hFFF) | immediate) :
+                     alu_result;
 
-  wire [4:0] final_waddr = (is_call_r || is_return_r) ? 5'd31 : waddr;
-  wire final_reg_write = (write_r || is_call_r || is_return_r) && (state == S4) && !hlt;
+  wire [4:0] final_waddr    = (is_call_r || is_return_r) ? 5'd31 : waddr;
+  wire       final_reg_write = (write_r || is_call_r || is_return_r) &&
+                                (state == S4) && !hlt;
 
-  // PC advance ctrl
-  wire advance = (state == S2) && !hlt && !is_branch_r && !is_jump_r && !is_call_r && !is_return_r;
+  // advance: only when not redirecting PC this cycle
+  wire advance = (state == S2) && !hlt &&
+                 !is_branch_r && !is_jump_r && !is_call_r && !is_return_r;
 
-  // fetch
   fetch fetch_inst (
       .clk(clk),
       .reset(reset),
       .halt(hlt),
       .advance(advance),
-      .is_jump(is_jump_r && state == S2),
-      .is_branch(is_branch_r && state == S2),
-      .is_brgt(is_brgt_r),
+      .is_jump   (is_jump_r    && (state == S2)),
+      .is_branch (is_branch_r  && (state == S2)),
+      .is_brgt   (is_brgt_r),
       .is_brr_reg(is_brr_reg_r),
       .is_brr_imm(is_brr_imm_r),
-      // On return/call, the PC update happens after S3 provides the data/target
-      .is_return(is_return_r && state == S3),
-      .is_call(is_call_r && state == S2),
+      .is_return (is_return_r  && (state == S3)),
+      .is_call   (is_call_r    && (state == S2)),
       .branch_cond(alu_result[0]),
       .data1(data1),
       .data2(data2),
@@ -168,7 +178,6 @@ module tinker_core (
       .pc(pc)
   );
 
-  // decoder
   decoder dec_inst (
       .instr(dec_instr),
       .raddr1(raddr1),
@@ -193,7 +202,6 @@ module tinker_core (
       .rt_addr(rt_addr)
   );
 
-  // regfile
   reg_file reg_file (
       .clk(clk),
       .reset(reset),

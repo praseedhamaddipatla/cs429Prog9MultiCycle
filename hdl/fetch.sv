@@ -36,20 +36,19 @@ module fetch (
   wire taken = (is_branch && branch_cond) || is_jump;
 
   //mux
-  wire [63:0] next_pc = is_return ? mem_rdata :  // return: target from stack
-  is_brr_imm ? (pc_reg + immediate) :  // brr L: pc-relative imm
-  is_brr_reg ? (pc_reg + data1) :  // brr rd: pc-relative reg
-  (is_branch && is_brgt) ? data1 :  // brgt: target in rd
-  is_branch ? data2 :  // brnz: target in rd (raddr2)
-  data1;  // br/call: target in rd
-
-  wire is_jumping = (is_branch && branch_cond) || is_jump || is_return || is_call;
+  wire [63:0] next_pc =
+      is_return              ? mem_rdata            :  // return: target from stack
+      is_brr_imm             ? (pc_reg + immediate) :  // brr L: pc-relative imm
+      is_brr_reg             ? (pc_reg + data1)     :  // brr rd: pc-relative reg
+      (is_branch && is_brgt) ? data1                :  // brgt: target in rd
+      is_branch              ? data2                :  // brnz: target in rd (raddr2)
+                               data1;                  // br/call: target in rd
 
   always @(posedge clk) begin
     if (reset) begin
       pc_reg <= `PC_START;
     end else if (!halt) begin
-      if (is_jumping) begin  // Use combined signal here
+      if (taken) begin
         if (next_pc >= `MEM_SIZE) pc_reg <= `PC_START;
         else pc_reg <= next_pc;
       end else if (advance) begin
