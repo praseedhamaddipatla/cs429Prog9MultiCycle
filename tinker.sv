@@ -28,7 +28,13 @@ module tinker_core (
   reg is_mov_reg_r, is_mov_imm_r;
   reg is_brgt_r, is_brr_reg_r, is_brr_imm_r;
 
-  // state trans
+  // -----------------------------------------------------------------------
+  // State transitions
+  // call  : needs S3 (write to Mem[r31-8]) then S4 (redirect PC — no reg wb)
+  // return: needs S3 (read  from Mem[r31-8]) then S4 (redirect PC — no reg wb)
+  // Neither modifies a register so needS4 only fires for them to allow the
+  // fetch redirect at S4.
+  // -----------------------------------------------------------------------
   wire needS3 = is_load_r || is_store_r || is_call_r || is_return_r;
   wire needS4 = (write_r || is_call_r || is_return_r) &&
                 !is_store_r && !is_branch_r && !is_jump_r && !is_halt_r;
@@ -97,10 +103,10 @@ module tinker_core (
     else if (is_halt_r) hlt <= 1;
   end
 
-  // live stack pointer wire
+  // live SP wire — read-only, never written by call/return
   wire [63:0] r31_val = reg_file.registers[31];
 
-  // PC latch — capture at S1 for call's return-address calculation
+  // PC latch — capture at S1 for call's return-address: Mem[r31-8] = pc+4
   reg [63:0] pc_latch;
   always @(posedge clk) begin
     if (state == S1) pc_latch <= pc;
@@ -118,21 +124,23 @@ module tinker_core (
   );
 
   // -----------------------------------------------------------------------
-  // Memory address/data — live combinatorial wires like friend's design.
-  // call:    write (pc_latch+4) to (SP-8)
-  // return:  read  from         (SP-8)
-  // load/store: data1 + immediate / data2
+  // Memory address / write-data — combinatorial, matching friend's design.
+  //
+  // ISA:
+  //   call:   Mem[r31-8] = pc+4  (write)   pc <- rd   (no SP change)
+  //   return: pc <- Mem[r31-8]   (read)              (no SP change)
+  //   load:   rd = Mem[rs + L]   (read)
+  //   store:  Mem[rd + L] = rs   (write)
   // -----------------------------------------------------------------------
   wire [63:0] mem_data_addr =
-      is_call_r   ? (r31_val - 64'd8) :
-      is_return_r ? (r31_val - 64'd8) :
-                    (data1 + immediate);
+      (is_call_r || is_return_r) ? (r31_val - 64'd8) :
+                                   (data1 + immediate);
 
   wire [63:0] mem_write_val =
       is_call_r ? (pc_latch + 64'd4) :
                   data2;
 
-  // call writes at S3; store writes at S3
+  // write fires at S3 for call and store
   wire mem_we = (is_store_r || is_call_r) && (state == S3) && !hlt;
 
   mem_module #(
@@ -147,7 +155,7 @@ module tinker_core (
       .read_data (mem_rdata)
   );
 
-  // Latch mem_rdata at end of S3 — return uses this at S4 for PC redirect
+  // Latch mem_rdata at end of S3 so S4 has a stable return address
   reg [63:0] mem_out_reg;
   always @(posedge clk) begin
     if (state == S3) mem_out_reg <= mem_rdata;
@@ -155,90 +163,89 @@ module tinker_core (
 
   // -----------------------------------------------------------------------
   // Writeback
-  //   call    → new SP = SP-8  → r31
-  //   return  → new SP = SP+8  → r31
-  //   load    → mem_out_reg
-  //   mov_reg → data1
-  //   mov_imm → upper data1 | immediate
-  //   default → alu_result
+  //   call    → NO register write (SP unchanged per ISA)
+  //   return  → NO register write (SP unchanged per ISA)
+  //   load    → rd = mem_out_reg
+  //   mov_reg → rd = data1
+  //   mov_imm → rd = (data1 & ~0xFFF) | immediate
+  //   default → rd = alu_result
   // -----------------------------------------------------------------------
   wire [63:0] wb_data =
       is_load_r    ? mem_out_reg                       :
-      is_call_r    ? (r31_val - 64'd8)                 :
-      is_return_r  ? (r31_val + 64'd8)                 :
       is_mov_reg_r ? data1                             :
       is_mov_imm_r ? ((data1 & ~64'hFFF) | immediate)  :
                      alu_result;
 
-  wire [4:0] final_waddr     = (is_call_r || is_return_r) ? 5'd31 : waddr;
-  wire       final_reg_write = (write_r || is_call_r || is_return_r) &&
+  // call and return do NOT write any register
+  wire [4:0] final_waddr     = waddr;
+  wire       final_reg_write = write_r && !is_call_r && !is_return_r &&
                                (state == S4) && !hlt;
 
-  // advance PC only when not redirecting
+  // advance PC only when not doing a redirect this cycle
   wire advance = (state == S2) && !hlt &&
                  !is_branch_r && !is_jump_r && !is_call_r && !is_return_r;
 
   // -----------------------------------------------------------------------
-  // Fetch — redirect timing matches friend's design:
-  //   call:   redirect at S2 (target register known from decode)
-  //   return: redirect at S4 using mem_out_reg latched from S3
+  // Fetch — redirect timing
+  //   call:   fires at S2, target = data1 (rd register value)
+  //   return: fires at S4, target = mem_out_reg (latched from S3 read)
   // -----------------------------------------------------------------------
   fetch fetch_inst (
-      .clk       (clk),
-      .reset     (reset),
-      .halt      (hlt),
-      .advance   (advance),
-      .is_jump   (is_jump_r    && (state == S2)),
-      .is_branch (is_branch_r  && (state == S2)),
-      .is_brgt   (is_brgt_r),
-      .is_brr_reg(is_brr_reg_r),
-      .is_brr_imm(is_brr_imm_r),
-      .is_return (is_return_r  && (state == S4)),  // use latched mem_out_reg at S4
-      .is_call   (is_call_r    && (state == S2)),
+      .clk        (clk),
+      .reset      (reset),
+      .halt       (hlt),
+      .advance    (advance),
+      .is_jump    (is_jump_r    && (state == S2)),
+      .is_branch  (is_branch_r  && (state == S2)),
+      .is_brgt    (is_brgt_r),
+      .is_brr_reg (is_brr_reg_r),
+      .is_brr_imm (is_brr_imm_r),
+      .is_return  (is_return_r  && (state == S4)),  // use stable mem_out_reg
+      .is_call    (is_call_r    && (state == S2)),
       .branch_cond(alu_result[0]),
-      .data1     (data1),
-      .data2     (data2),
-      .immediate (immediate),
-      .mem_rdata (mem_out_reg),  // latched — stable at S4
-      .pc        (pc)
+      .data1      (data1),
+      .data2      (data2),
+      .immediate  (immediate),
+      .mem_rdata  (mem_out_reg),   // latched, stable at S4
+      .pc         (pc)
   );
 
   decoder dec_inst (
-      .instr    (dec_instr),
-      .raddr1   (raddr1),
-      .raddr2   (raddr2),
-      .waddr    (waddr),
-      .immediate(immediate),
-      .op       (op),
-      .use_imm  (use_imm),
-      .write    (write),
-      .is_load  (is_load),
-      .is_store (is_store),
-      .is_branch(is_branch),
-      .is_brgt  (is_brgt),
-      .is_jump  (is_jump),
-      .is_brr_reg(is_brr_reg),
-      .is_brr_imm(is_brr_imm),
-      .is_return(is_return),
-      .is_call  (is_call),
-      .is_halt  (is_halt),
-      .is_mov_reg(is_mov_reg),
-      .is_mov_imm(is_mov_imm),
-      .rt_addr  (rt_addr)
+      .instr      (dec_instr),
+      .raddr1     (raddr1),
+      .raddr2     (raddr2),
+      .waddr      (waddr),
+      .immediate  (immediate),
+      .op         (op),
+      .use_imm    (use_imm),
+      .write      (write),
+      .is_load    (is_load),
+      .is_store   (is_store),
+      .is_branch  (is_branch),
+      .is_brgt    (is_brgt),
+      .is_jump    (is_jump),
+      .is_brr_reg (is_brr_reg),
+      .is_brr_imm (is_brr_imm),
+      .is_return  (is_return),
+      .is_call    (is_call),
+      .is_halt    (is_halt),
+      .is_mov_reg (is_mov_reg),
+      .is_mov_imm (is_mov_imm),
+      .rt_addr    (rt_addr)
   );
 
   reg_file reg_file (
-      .clk   (clk),
-      .reset (reset),
-      .raddr1(raddr1),
-      .raddr2(raddr2),
-      .raddr3(rt_addr),
-      .waddr (final_waddr),
-      .data  (wb_data),
-      .write (final_reg_write),
-      .r1    (data1),
-      .r2    (data2),
-      .r3    (data3)
+      .clk    (clk),
+      .reset  (reset),
+      .raddr1 (raddr1),
+      .raddr2 (raddr2),
+      .raddr3 (rt_addr),
+      .waddr  (final_waddr),
+      .data   (wb_data),
+      .write  (final_reg_write),
+      .r1     (data1),
+      .r2     (data2),
+      .r3     (data3)
   );
 
 endmodule
